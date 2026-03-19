@@ -848,7 +848,7 @@ export default function AdminMessages() {
                            <button
                               type="button"
                               onClick={handleAddAssistantFaq}
-                              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 text-white text-sm font-bold py-2.5 hover:bg-slate-800"
+                              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[#15803d] text-white text-sm font-bold py-2.5 hover:bg-[#166534]"
                            >
                               <Plus className="w-4 h-4" />
                               Add FAQ Item
