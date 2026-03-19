@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 import { createPageUrl } from "./utils";
 import { Menu, X, Phone, Mail, MapPin, Facebook, Instagram, Youtube, ChevronDown, HelpCircle, ChevronUp, MessageCircle, SendHorizontal } from "lucide-react";
 import vicmarLogo from "@/images/logos/transparent-vicmar-logo.png";
@@ -7,16 +8,21 @@ import vicmarLogoFooter from "@/images/logos/vicmar-logo-footer.png";
 import {
   appendBotMessage,
   appendUserMessage,
+  closeSupportSession,
   createSupportSession,
   DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
   DEFAULT_SUPPORT_FAQ_ITEMS,
   DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
   DEFAULT_SUPPORT_WELCOME_MESSAGE,
   endSupportSession,
+  getSupportSessionIdleExpiration,
   getOrCreateActiveSupportSession,
   requestLiveAgent,
+  setSupportTypingState,
   subscribeToSupportChatConfig,
   subscribeToSupportSessions,
+  SUPPORT_CHAT_IDLE_TIMEOUT_MS,
+  touchSupportActivity,
 } from "@/lib/supportChatService";
 import { buildVicinitySlots, getAllVicinityProperties } from "@/lib/vicinitySlots";
 import { normalizeSlotStatus } from "@/lib/slotStatus";
@@ -24,9 +30,9 @@ import { subscribeToSlotStatuses } from "@/lib/slotStatusService";
 const CHAT_MAX_CHARACTERS = 320;
 const CHAT_MAX_WORDS = 60;
 const CHAT_MAX_WORD_LENGTH = 42;
-const CHAT_MIN_SEND_INTERVAL_MS = 1200;
-const CHAT_BURST_WINDOW_MS = 15000;
-const CHAT_BURST_MAX_MESSAGES = 4;
+const CHAT_MIN_SEND_INTERVAL_MS = 0;
+const CHAT_BURST_WINDOW_MS = 0;
+const CHAT_BURST_MAX_MESSAGES = 0;
 
 function detectPropertyTypeIntent(question) {
   const q = String(question ?? "").toLowerCase();
@@ -106,9 +112,58 @@ function summarizeTypes(slots) {
     .join(", ");
 }
 
+function summarizePrice(slots, requestedType = "") {
+  const prices = slots
+    .filter((slot) => typeMatches(slot.type, requestedType))
+    .map((slot) => Number(slot.price))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (prices.length === 0) {
+    return null;
+  }
+
+  return {
+    min: Math.min(...prices),
+    max: Math.max(...prices),
+  };
+}
+
+function formatPrice(value) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function isLiveAgentIntent(question) {
+  const q = String(question ?? "").toLowerCase();
+  return (
+    q.includes("live agent") ||
+    q.includes("contact agent") ||
+    q.includes("contact live agent") ||
+    q.includes("talk to agent") ||
+    q.includes("speak to agent") ||
+    q.includes("chat with agent") ||
+    q.includes("human agent")
+  );
+}
+
+function containsAny(text, terms) {
+  return terms.some((term) => text.includes(term));
+}
+
 function getRuleBasedBotReply(question, slots, assistantConfig) {
   const q = String(question ?? "").toLowerCase();
   const requestedType = detectPropertyTypeIntent(q);
+
+  if (containsAny(q, ["hello", "hi", "good morning", "good afternoon", "good evening", "hey"])) {
+    return "Hello. I can help with unit availability, prices, lot sizes, financing, and site visit scheduling. Ask anything or tap Request live agent for direct assistance.";
+  }
+
+  if (containsAny(q, ["thank you", "thanks", "tnx", "salamat"])) {
+    return "You are welcome. If you want, I can also check current availability or pricing by unit type right now.";
+  }
 
   const asksAvailability =
     q.includes("available") ||
@@ -136,6 +191,31 @@ function getRuleBasedBotReply(question, slots, assistantConfig) {
     }
   }
 
+  const asksPrice =
+    q.includes("how much") ||
+    q.includes("price") ||
+    q.includes("cost") ||
+    q.includes("monthly") ||
+    q.includes("downpayment") ||
+    q.includes("dp");
+  if (asksPrice) {
+    const priceSummary = summarizePrice(slots, requestedType);
+    if (priceSummary) {
+      const scopeLabel = requestedType ? `${requestedType} units` : "units";
+      const priceText = priceSummary.min === priceSummary.max
+        ? `${formatPrice(priceSummary.min)}`
+        : `${formatPrice(priceSummary.min)} to ${formatPrice(priceSummary.max)}`;
+
+      return `Based on current slot pricing data, ${scopeLabel} are around ${priceText}. Final pricing can vary by lot, promo, and financing terms.`;
+    }
+
+    if (requestedType) {
+      return `I do not have a confirmed price value yet for ${requestedType} units in the current live data. Tap Request live agent so we can provide an updated quotation.`;
+    }
+
+    return "I can help with estimated pricing, but I need the unit type first (for example: duplex, triplex, rowhouse).";
+  }
+
   if (q.includes("what units") || q.includes("unit types") || q.includes("types available")) {
     const typesText = summarizeTypes(slots);
     if (typesText) {
@@ -145,6 +225,26 @@ function getRuleBasedBotReply(question, slots, assistantConfig) {
 
   if (q.includes("payment") || q.includes("financing") || q.includes("pag ibig") || q.includes("pag-ibig") || q.includes("loan")) {
     return "We support flexible payment options including bank financing, Pag-IBIG, in-house financing, and spot cash options. I can connect you to a live agent to discuss exact computations and requirements.";
+  }
+
+  if (containsAny(q, ["requirement", "requirements", "documents", "docs", "what do i need", "requirements for"] )) {
+    return "Typical requirements include valid IDs, proof of billing/address, proof of income, and financing-specific forms. Exact requirements depend on your chosen financing option, so a live agent can send a complete checklist.";
+  }
+
+  if (containsAny(q, ["site visit", "tripping", "visit", "schedule", "appointment"])) {
+    return "We can help schedule your site visit. Please share your preferred date and time, or tap Request live agent so we can finalize your appointment quickly.";
+  }
+
+  if (containsAny(q, ["promo", "discount", "discounts", "offer", "offers", "special offer"])) {
+    return "Promos and discounts can vary by unit type and payment terms. For the latest active promos and exact computation, tap Request live agent and we will assist you directly.";
+  }
+
+  if (containsAny(q, ["turnover", "move in", "move-in", "ready for occupancy", "rfo", "occupancy"])) {
+    return "Turnover timelines depend on the selected unit and project schedule. A live agent can confirm the most updated expected turnover for your preferred lot.";
+  }
+
+  if (containsAny(q, ["contact", "phone", "email", "call", "reach"] )) {
+    return "You can use the Contact Us page for direct details, or tap Request live agent here and an admin will continue the conversation in this chat.";
   }
 
   if (q.includes("amenit") || q.includes("garden") || q.includes("playground") || q.includes("community")) {
@@ -197,6 +297,12 @@ function validateChatMessage(rawValue) {
   return { ok: true, value: normalized, reason: "" };
 }
 
+function isPermissionError(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  const message = String(error?.message ?? "").toLowerCase();
+  return code === "permission-denied" || message.includes("missing or insufficient permissions");
+}
+
 export default function Layout({ children, currentPageName }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
@@ -220,6 +326,7 @@ export default function Layout({ children, currentPageName }) {
   const chatMessagesRef = useRef(null);
   const lastUserSendAtRef = useRef(0);
   const recentUserSendsRef = useRef([]);
+  const typingDebounceRef = useRef(null);
 
   useEffect(() => {
     const onScroll = () => setShowScrollTop(window.scrollY > 300);
@@ -350,12 +457,51 @@ export default function Layout({ children, currentPageName }) {
   }, [activeChatId, chatSession]);
 
   useEffect(() => {
+    return () => {
+      if (typingDebounceRef.current) {
+        window.clearTimeout(typingDebounceRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!chatMessagesRef.current) {
       return;
     }
 
     chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
   }, [faqOpen, chatSession?.messages?.length]);
+
+  useEffect(() => {
+    if (!activeChatId || !chatSession) {
+      return;
+    }
+
+    if (chatSession.status === "closed") {
+      return;
+    }
+
+    if (!chatSession.liveAgentRequested) {
+      return;
+    }
+
+    const intervalId = window.setInterval(async () => {
+      const expiration = getSupportSessionIdleExpiration(chatSession);
+      if (!expiration) {
+        return;
+      }
+
+      await closeSupportSession(activeChatId, {
+        reason: "expired",
+        actor: "system",
+        message: "Chat expired due to inactivity. You can review this chat and delete it when done.",
+      });
+    }, 15000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeChatId, chatSession]);
 
   const scrollToTop = () => window.scrollTo({ top: 0, behavior: "smooth" });
 
@@ -391,18 +537,6 @@ export default function Layout({ children, currentPageName }) {
     }
 
     const now = Date.now();
-    const timeSinceLastSend = now - lastUserSendAtRef.current;
-    if (timeSinceLastSend < CHAT_MIN_SEND_INTERVAL_MS) {
-      setChatInputError(`Please wait ${Math.ceil((CHAT_MIN_SEND_INTERVAL_MS - timeSinceLastSend) / 1000)}s before sending again.`);
-      return;
-    }
-
-    recentUserSendsRef.current = recentUserSendsRef.current.filter((timestamp) => now - timestamp <= CHAT_BURST_WINDOW_MS);
-    if (recentUserSendsRef.current.length >= CHAT_BURST_MAX_MESSAGES) {
-      setChatInputError("Too many messages in a short time. Please slow down.");
-      return;
-    }
-
     const normalizedQuestion = question.toLowerCase();
     const lastUserMessage = [...(chatSession?.messages ?? [])]
       .reverse()
@@ -415,7 +549,36 @@ export default function Layout({ children, currentPageName }) {
     lastUserSendAtRef.current = now;
     recentUserSendsRef.current.push(now);
 
-    appendUserMessage(sessionId, question);
+    await appendUserMessage(sessionId, question);
+  void touchSupportActivity(sessionId, "user");
+  void setSupportTypingState(sessionId, "user", false);
+
+    if (isLiveAgentIntent(question)) {
+      try {
+        await requestLiveAgent(sessionId);
+      } catch (error) {
+        if (isPermissionError(error)) {
+          try {
+            const nextSession = await createSupportSession();
+            setActiveChatId(nextSession.id);
+            setChatSession(nextSession);
+            await requestLiveAgent(nextSession.id);
+            toast.success("Chat session refreshed. Live agent request sent.");
+            return;
+          } catch (retryError) {
+            const retryMessage = String(retryError?.message ?? "Unable to request live agent right now.");
+            setChatInputError(retryMessage);
+            toast.error(retryMessage);
+            return;
+          }
+        }
+
+        const message = String(error?.message ?? "Unable to request live agent right now.");
+        setChatInputError(message);
+        toast.error(message);
+      }
+      return;
+    }
 
     if (chatSession?.status === "awaiting-agent" || chatSession?.status === "agent-connected") {
       return;
@@ -423,9 +586,7 @@ export default function Layout({ children, currentPageName }) {
 
     const botReply = getRuleBasedBotReply(question, mappedSlots, assistantConfig);
 
-    window.setTimeout(() => {
-      appendBotMessage(sessionId, botReply);
-    }, 240);
+    await appendBotMessage(sessionId, botReply);
   };
 
   const handleSubmitChatInput = async (e) => {
@@ -436,8 +597,8 @@ export default function Layout({ children, currentPageName }) {
       return;
     }
 
-    await handleSendQuestion(validation.value);
     setChatInput("");
+    await handleSendQuestion(validation.value);
   };
 
   const handleRequestLiveAgent = async () => {
@@ -446,10 +607,50 @@ export default function Layout({ children, currentPageName }) {
       return;
     }
 
-    requestLiveAgent(sessionId);
+    try {
+      await touchSupportActivity(sessionId, "user");
+      await requestLiveAgent(sessionId);
+    } catch (error) {
+      if (isPermissionError(error)) {
+        try {
+          const nextSession = await createSupportSession();
+          setActiveChatId(nextSession.id);
+          setChatSession(nextSession);
+          await requestLiveAgent(nextSession.id);
+          toast.success("Chat session refreshed. Live agent request sent.");
+          return;
+        } catch (retryError) {
+          const retryMessage = String(retryError?.message ?? "Unable to request live agent right now.");
+          setChatInputError(retryMessage);
+          toast.error(retryMessage);
+          return;
+        }
+      }
+
+      const message = String(error?.message ?? "Unable to request live agent right now.");
+      setChatInputError(message);
+      toast.error(message);
+    }
   };
 
   const handleEndChat = async () => {
+    if (!activeChatId) {
+      return;
+    }
+
+    if (!chatSession?.liveAgentRequested) {
+      setChatInputError("End chat is available after requesting a live agent.");
+      return;
+    }
+
+    await closeSupportSession(activeChatId, {
+      reason: "user-ended",
+      actor: "user",
+      message: "Chat ended by user. You can review this chat and delete it when done.",
+    });
+  };
+
+  const handleDeleteClosedChat = async () => {
     if (!activeChatId) {
       return;
     }
@@ -464,6 +665,9 @@ export default function Layout({ children, currentPageName }) {
     setQuickQuestionsOpen(false);
     lastUserSendAtRef.current = 0;
     recentUserSendsRef.current = [];
+    if (typingDebounceRef.current) {
+      window.clearTimeout(typingDebounceRef.current);
+    }
   };
 
   const handleStartNewChat = async () => {
@@ -478,7 +682,8 @@ export default function Layout({ children, currentPageName }) {
   };
 
   const isChatClosed = chatSession?.status === "closed";
-
+  const isAdminTyping = chatSession?.typing?.admin && chatSession?.status === "agent-connected";
+  const idleLimitMinutes = Math.floor(SUPPORT_CHAT_IDLE_TIMEOUT_MS / 60000);
   const navLinks = [
     { name: "Home", page: "Home" },
     { name: "Listings", page: "Listings" },
@@ -944,27 +1149,27 @@ export default function Layout({ children, currentPageName }) {
                   </div>
                 );
               })}
+
+              {isAdminTyping ? (
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-relaxed bg-blue-50 border border-blue-100 text-blue-700">
+                    <p className="text-[10px] font-semibold text-blue-600 mb-1">Live agent</p>
+                    <p>is typing...</p>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="px-4 py-3 border-t border-gray-100 bg-white space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs text-slate-500">
-                  {chatSession?.status === "closed"
-                    ? "Chat ended"
-                    : chatSession?.status === "agent-connected"
-                    ? "Live agent connected"
-                    : chatSession?.status === "awaiting-agent"
-                      ? "Waiting for live agent"
-                      : "Chatting with FAQ assistant"}
-                </span>
+              <div className="flex items-center justify-end gap-3">
                 <div className="flex items-center gap-2">
                   {isChatClosed ? (
                     <button
                       type="button"
-                      onClick={handleStartNewChat}
+                      onClick={handleDeleteClosedChat}
                       className="text-xs font-semibold px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
                     >
-                      Start new chat
+                      Delete chat
                     </button>
                   ) : (
                     <>
@@ -979,7 +1184,8 @@ export default function Layout({ children, currentPageName }) {
                       <button
                         type="button"
                         onClick={handleEndChat}
-                        className="text-xs font-semibold px-3 py-1.5 rounded-full border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                        disabled={!chatSession?.liveAgentRequested}
+                        className="text-xs font-semibold px-3 py-1.5 rounded-full border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 disabled:hover:bg-slate-100 disabled:cursor-not-allowed"
                       >
                         End chat
                       </button>
@@ -1042,6 +1248,17 @@ export default function Layout({ children, currentPageName }) {
                     if (chatInputError) {
                       setChatInputError("");
                     }
+
+                    if (activeChatId && !isChatClosed) {
+                      void setSupportTypingState(activeChatId, "user", nextValue.trim().length > 0);
+                      void touchSupportActivity(activeChatId, "user");
+                      if (typingDebounceRef.current) {
+                        window.clearTimeout(typingDebounceRef.current);
+                      }
+                      typingDebounceRef.current = window.setTimeout(() => {
+                        setSupportTypingState(activeChatId, "user", false);
+                      }, 1200);
+                    }
                   }}
                   disabled={isChatClosed}
                   placeholder="Type your question"
@@ -1059,12 +1276,15 @@ export default function Layout({ children, currentPageName }) {
 
               <div className="flex items-center justify-between">
                 <p className={`text-[11px] ${chatInputError ? "text-rose-600" : "text-gray-400"}`}>
-                  {chatInputError || `Max ${CHAT_MAX_CHARACTERS} characters · ${CHAT_BURST_MAX_MESSAGES} msgs / ${Math.floor(CHAT_BURST_WINDOW_MS / 1000)}s`}
+                  {chatInputError || `Max ${CHAT_MAX_CHARACTERS} characters`}
                 </p>
                 <p className="text-[11px] text-gray-400">{chatInput.length}/{CHAT_MAX_CHARACTERS}</p>
               </div>
 
               <p className="text-[11px] text-gray-400 text-center">Need direct help? <Link to={createPageUrl("ContactUs")} onClick={() => setFaqOpen(false)} className="text-[#16a34a] font-semibold hover:underline">Contact us</Link></p>
+              {chatSession?.liveAgentRequested && !isChatClosed ? (
+                <p className="text-[11px] text-gray-400 text-center">This live chat auto-expires after about {idleLimitMinutes} minutes of inactivity.</p>
+              ) : null}
             </div>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import {
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -21,7 +22,9 @@ const SUPPORT_FORCE_FALLBACK_UNTIL_KEY = "vicmar_support_force_fallback_until";
 const LOCAL_CHANGE_EVENT = "vicmar-support-chat-updated";
 const LOCAL_CONFIG_CHANGE_EVENT = "vicmar-support-chat-config-updated";
 const MAX_SUPPORT_MESSAGE_LENGTH = 320;
-const FORCE_FALLBACK_DURATION_MS = 10 * 60 * 1000;
+const FORCE_FALLBACK_DURATION_MS = 0;
+export const SUPPORT_CHAT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const FIRESTORE_RETRY_DELAY_MS = 250;
 
 export const DEFAULT_SUPPORT_WELCOME_MESSAGE = "Hi! I am Vicmar assistant. Choose a question below or type your own question.";
 export const DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE = "Live agent request submitted. An admin will reply here soon.";
@@ -295,10 +298,20 @@ function normalizeSession(sessionId, rawSession) {
     id: sessionId,
     createdAt: String(rawSession?.createdAt ?? nowIso()),
     updatedAt: String(rawSession?.updatedAt ?? rawSession?.createdAt ?? nowIso()),
+    closedReason: String(rawSession?.closedReason ?? "").trim(),
     status: String(rawSession?.status ?? "bot"),
     liveAgentRequested: Boolean(rawSession?.liveAgentRequested),
     visitorId,
     visitorLabel: String(rawSession?.visitorLabel ?? `Visitor ${(visitorId || sessionId).slice(-4).toUpperCase()}`),
+    typing: {
+      user: Boolean(rawSession?.typing?.user),
+      admin: Boolean(rawSession?.typing?.admin),
+      updatedAt: String(rawSession?.typing?.updatedAt ?? rawSession?.updatedAt ?? nowIso()),
+    },
+    activity: {
+      userAt: String(rawSession?.activity?.userAt ?? rawSession?.updatedAt ?? rawSession?.createdAt ?? nowIso()),
+      adminAt: String(rawSession?.activity?.adminAt ?? rawSession?.updatedAt ?? rawSession?.createdAt ?? nowIso()),
+    },
     messages: normalizedMessages,
   };
 }
@@ -307,10 +320,20 @@ function stripSessionForWrite(session) {
   return {
     createdAt: String(session.createdAt ?? nowIso()),
     updatedAt: String(session.updatedAt ?? session.createdAt ?? nowIso()),
+    closedReason: String(session.closedReason ?? "").trim(),
     status: String(session.status ?? "bot"),
     liveAgentRequested: session.liveAgentRequested,
     visitorId: String(session.visitorId ?? ""),
     visitorLabel: String(session.visitorLabel ?? "Visitor"),
+    typing: {
+      user: Boolean(session.typing?.user),
+      admin: Boolean(session.typing?.admin),
+      updatedAt: String(session.typing?.updatedAt ?? session.updatedAt ?? session.createdAt ?? nowIso()),
+    },
+    activity: {
+      userAt: String(session.activity?.userAt ?? session.updatedAt ?? session.createdAt ?? nowIso()),
+      adminAt: String(session.activity?.adminAt ?? session.updatedAt ?? session.createdAt ?? nowIso()),
+    },
     messages: Array.isArray(session.messages)
       ? session.messages.map((message, index) => toWritableMessage(message, index))
       : [],
@@ -326,10 +349,20 @@ function createSessionObject(visitorId, welcomeMessage = DEFAULT_SUPPORT_WELCOME
     id: sessionId,
     createdAt,
     updatedAt: createdAt,
+    closedReason: "",
     status: "bot",
     liveAgentRequested: false,
     visitorId: resolvedVisitorId,
     visitorLabel: `Visitor ${resolvedVisitorId.slice(-4).toUpperCase()}`,
+    typing: {
+      user: false,
+      admin: false,
+      updatedAt: createdAt,
+    },
+    activity: {
+      userAt: createdAt,
+      adminAt: createdAt,
+    },
     messages: [
       createBotMessage(String(welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE),
     ],
@@ -340,8 +373,10 @@ async function mutateSession(chatId, mutator, options = {}) {
   const sessionRef = doc(db, SUPPORT_CHATS_COLLECTION, chatId);
   const fallbackSession = getFallbackSessionById(chatId);
   const allowAnonymous = options.allowAnonymous ?? true;
+  const forceFirestore = options.forceFirestore === true;
+  const fallbackOnError = options.fallbackOnError !== false;
 
-  if (isFirestoreTemporarilyDisabled()) {
+  if (isFirestoreTemporarilyDisabled() && !forceFirestore) {
     return mutateFallbackSession(chatId, mutator);
   }
 
@@ -385,6 +420,9 @@ async function mutateSession(chatId, mutator, options = {}) {
     return nextSession;
   } catch (error) {
     logUnexpectedError(error);
+    if (!fallbackOnError) {
+      throw error;
+    }
     return mutateFallbackSession(chatId, mutator);
   }
 }
@@ -445,6 +483,11 @@ export async function createSupportSession() {
     }
   } catch (error) {
     logUnexpectedError(error);
+    throw error;
+  }
+
+  if (!authVisitorId) {
+    throw new Error("Unable to create chat session because user authentication is missing.");
   }
 
   const newSession = createSessionObject(authVisitorId, welcomeMessage);
@@ -520,14 +563,12 @@ function subscribeToFallbackSessions(onChange, options = {}) {
 export function subscribeToSupportSessions(onChange, onError, options = {}) {
   const allowAnonymous = options.allowAnonymous ?? true;
   const scopedChatId = options.chatId ? String(options.chatId) : "";
-  const unsubscribeFallback = subscribeToFallbackSessions(onChange, { chatId: scopedChatId });
+  const useFallback = allowAnonymous !== false;
+  const unsubscribeFallback = useFallback
+    ? subscribeToFallbackSessions(onChange, { chatId: scopedChatId })
+    : () => {};
   let unsubscribeFirestore = () => {};
-
-  if (isFirestoreTemporarilyDisabled()) {
-    return () => {
-      unsubscribeFallback();
-    };
-  }
+  let retryTimerId = null;
 
   let fallbackEnabled = false;
 
@@ -546,6 +587,13 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
   let isCancelled = false;
 
   const startFirestoreSync = async () => {
+    if (isFirestoreTemporarilyDisabled()) {
+      retryTimerId = window.setTimeout(() => {
+        startFirestoreSync();
+      }, FIRESTORE_RETRY_DELAY_MS);
+      return;
+    }
+
     try {
       await ensureSupportAuth(allowAnonymous);
       if (isCancelled) {
@@ -602,6 +650,9 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
 
   return () => {
     isCancelled = true;
+    if (retryTimerId) {
+      window.clearTimeout(retryTimerId);
+    }
     unsubscribeFallback();
     unsubscribeFirestore();
   };
@@ -613,23 +664,57 @@ export async function appendUserMessage(chatId, text) {
     return null;
   }
 
-  return await mutateSession(chatId, (session) => {
-    const createdAt = nowIso();
+  const currentSession = getSupportSession(chatId);
+  if (!currentSession) {
+    return null;
+  }
 
-    return {
-      ...session,
+  const createdAt = nowIso();
+  const message = {
+    id: generateId("msg"),
+    sender: "user",
+    text: trimmed,
+    createdAt,
+  };
+
+  const nextSession = normalizeSession(chatId, {
+    ...currentSession,
+    updatedAt: createdAt,
+    typing: {
+      ...(currentSession.typing ?? {}),
+      user: false,
       updatedAt: createdAt,
-      messages: [
-        ...(session.messages ?? []),
-        {
-          id: generateId("msg"),
-          sender: "user",
-          text: trimmed,
-          createdAt,
-        },
-      ],
-    };
+    },
+    activity: {
+      ...(currentSession.activity ?? {}),
+      userAt: createdAt,
+    },
+    messages: [
+      ...(currentSession.messages ?? []),
+      message,
+    ],
   });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await ensureSupportAuth(true);
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        updatedAt: createdAt,
+        typing: nextSession.typing,
+        activity: nextSession.activity,
+        messages: arrayUnion(toWritableMessage(message)),
+      },
+      { merge: true },
+    );
+    disableTemporaryFallback();
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
 }
 
 export async function appendBotMessage(chatId, text) {
@@ -638,21 +723,44 @@ export async function appendBotMessage(chatId, text) {
     return null;
   }
 
-  return await mutateSession(chatId, (session) => {
-    const createdAt = nowIso();
+  const currentSession = getSupportSession(chatId);
+  if (!currentSession) {
+    return null;
+  }
 
-    return {
-      ...session,
-      updatedAt: createdAt,
-      messages: [
-        ...(session.messages ?? []),
-        {
-          ...createBotMessage(trimmed),
-          createdAt,
-        },
-      ],
-    };
+  const createdAt = nowIso();
+  const message = {
+    ...createBotMessage(trimmed),
+    createdAt,
+  };
+
+  const nextSession = normalizeSession(chatId, {
+    ...currentSession,
+    updatedAt: createdAt,
+    messages: [
+      ...(currentSession.messages ?? []),
+      message,
+    ],
   });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await ensureSupportAuth(true);
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        updatedAt: createdAt,
+        messages: arrayUnion(toWritableMessage(message)),
+      },
+      { merge: true },
+    );
+    disableTemporaryFallback();
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
 }
 
 export async function requestLiveAgent(chatId) {
@@ -661,37 +769,183 @@ export async function requestLiveAgent(chatId) {
     supportConfig?.automationMessages?.liveAgentRequestedMessage ?? DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
   ).trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE;
 
-  return await mutateSession(chatId, (session) => {
-    if (session.liveAgentRequested) {
-      return session;
+  let nextSession = null;
+
+  try {
+    nextSession = await mutateSession(chatId, (session) => {
+      if (session.liveAgentRequested) {
+        return session;
+      }
+
+      const createdAt = nowIso();
+
+      return {
+        ...session,
+        updatedAt: createdAt,
+        closedReason: "",
+        status: "awaiting-agent",
+        liveAgentRequested: true,
+        activity: {
+          ...(session.activity ?? {}),
+          userAt: createdAt,
+        },
+        typing: {
+          ...(session.typing ?? {}),
+          user: false,
+          updatedAt: createdAt,
+        },
+        messages: [
+          ...(session.messages ?? []),
+          {
+            id: generateId("msg"),
+            sender: "system",
+            text: liveAgentRequestedMessage,
+            createdAt,
+          },
+        ],
+      };
+    }, { forceFirestore: true, fallbackOnError: false });
+  } catch (error) {
+    if (!isPermissionDeniedError(error)) {
+      throw error;
     }
 
-    const createdAt = nowIso();
+    const authUser = await ensureSupportAuth(true);
+    const authUid = String(authUser?.uid ?? "").trim();
+    if (!authUid) {
+      throw error;
+    }
 
-    return {
-      ...session,
+    const fallbackSession = getFallbackSessionById(chatId);
+    const createdAt = nowIso();
+    const baseMessages = Array.isArray(fallbackSession?.messages)
+      ? fallbackSession.messages.map((message, index) => normalizeMessage(message, index))
+      : [];
+
+    const hasLiveAgentSystemMessage = baseMessages.some(
+      (message) => message.sender === "system" && String(message.text ?? "").trim() === liveAgentRequestedMessage,
+    );
+
+    const mergedMessages = hasLiveAgentSystemMessage
+      ? baseMessages
+      : [
+          ...baseMessages,
+          {
+            id: generateId("msg"),
+            sender: "system",
+            text: liveAgentRequestedMessage,
+            createdAt,
+          },
+        ];
+
+    nextSession = normalizeSession(chatId, {
+      ...(fallbackSession ?? {}),
+      createdAt: fallbackSession?.createdAt ?? createdAt,
       updatedAt: createdAt,
+      closedReason: "",
       status: "awaiting-agent",
       liveAgentRequested: true,
-      messages: [
-        ...(session.messages ?? []),
-        {
-          id: generateId("msg"),
-          sender: "system",
-          text: liveAgentRequestedMessage,
-          createdAt,
-        },
-      ],
-    };
-  });
+      visitorId: authUid,
+      visitorLabel: fallbackSession?.visitorLabel ?? `Visitor ${authUid.slice(-4).toUpperCase()}`,
+      typing: {
+        ...(fallbackSession?.typing ?? {}),
+        user: false,
+        admin: false,
+        updatedAt: createdAt,
+      },
+      activity: {
+        ...(fallbackSession?.activity ?? {}),
+        userAt: createdAt,
+        adminAt: String(fallbackSession?.activity?.adminAt ?? createdAt),
+      },
+      messages: mergedMessages,
+    });
+
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      stripSessionForWrite(nextSession),
+      { merge: true },
+    );
+
+    upsertFallbackSession(nextSession, false);
+    disableTemporaryFallback();
+  }
+
+  if (!nextSession) {
+    throw new Error("Unable to request live agent right now. Please try again.");
+  }
+
+  return nextSession;
 }
 
 export async function setConversationStatus(chatId, status) {
-  return await mutateSession(chatId, (session) => ({
-    ...session,
+  const updatedAt = nowIso();
+  const currentSession = getSupportSession(chatId);
+  const hasAcceptedMessage = (currentSession?.messages ?? []).some(
+    (message) => message.sender === "system" && String(message.text ?? "").trim() === "Live agent accepted your request. You are now connected.",
+  );
+
+  const acceptedMessage = {
+    id: generateId("msg"),
+    sender: "system",
+    text: "Live agent accepted your request. You are now connected.",
+    createdAt: updatedAt,
+  };
+
+  const writePayload = {
     status,
-    updatedAt: nowIso(),
-  }));
+    closedReason: status === "closed" ? String(currentSession?.closedReason ?? "").trim() : "",
+    updatedAt,
+    activity: {
+      ...(currentSession?.activity ?? {}),
+      adminAt: updatedAt,
+    },
+    typing: {
+      ...(currentSession?.typing ?? {}),
+      admin: false,
+      updatedAt,
+    },
+    ...(status === "agent-connected"
+      ? {
+          liveAgentRequested: true,
+          ...(!hasAcceptedMessage
+            ? { messages: arrayUnion(toWritableMessage(acceptedMessage)) }
+            : {}),
+        }
+      : {}),
+  };
+
+  await setDoc(doc(db, SUPPORT_CHATS_COLLECTION, chatId), writePayload, { merge: true });
+
+  if (currentSession) {
+    const nextSession = normalizeSession(chatId, {
+      ...currentSession,
+      status,
+      closedReason: status === "closed" ? String(currentSession.closedReason ?? "").trim() : "",
+      liveAgentRequested: status === "agent-connected" ? true : currentSession.liveAgentRequested,
+      updatedAt,
+      activity: {
+        ...(currentSession.activity ?? {}),
+        adminAt: updatedAt,
+      },
+      typing: {
+        ...(currentSession.typing ?? {}),
+        admin: false,
+        updatedAt,
+      },
+      messages: hasAcceptedMessage || status !== "agent-connected"
+        ? [...(currentSession.messages ?? [])]
+        : [
+            ...(currentSession.messages ?? []),
+            acceptedMessage,
+          ],
+    });
+
+    upsertFallbackSession(nextSession, false);
+    return nextSession;
+  }
+
+  return null;
 }
 
 export async function appendAdminMessage(chatId, text, adminName = "Admin") {
@@ -700,26 +954,64 @@ export async function appendAdminMessage(chatId, text, adminName = "Admin") {
     return null;
   }
 
-  return await mutateSession(chatId, (session) => {
-    const createdAt = nowIso();
+  const currentSession = getSupportSession(chatId);
+  if (!currentSession) {
+    return null;
+  }
 
-    return {
-      ...session,
-      status: "agent-connected",
-      liveAgentRequested: true,
+  const createdAt = nowIso();
+  const message = {
+    id: generateId("msg"),
+    sender: "admin",
+    text: trimmed,
+    adminName,
+    createdAt,
+  };
+
+  const nextSession = normalizeSession(chatId, {
+    ...currentSession,
+    status: "agent-connected",
+    closedReason: "",
+    liveAgentRequested: true,
+    updatedAt: createdAt,
+    typing: {
+      ...(currentSession.typing ?? {}),
+      admin: false,
       updatedAt: createdAt,
-      messages: [
-        ...(session.messages ?? []),
-        {
-          id: generateId("msg"),
-          sender: "admin",
-          text: trimmed,
-          adminName,
-          createdAt,
-        },
-      ],
-    };
+    },
+    activity: {
+      ...(currentSession.activity ?? {}),
+      adminAt: createdAt,
+    },
+    messages: [
+      ...(currentSession.messages ?? []),
+      message,
+    ],
   });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await ensureSupportAuth(true);
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        status: "agent-connected",
+        closedReason: "",
+        liveAgentRequested: true,
+        updatedAt: createdAt,
+        typing: nextSession.typing,
+        activity: nextSession.activity,
+        messages: arrayUnion(toWritableMessage(message)),
+      },
+      { merge: true },
+    );
+    disableTemporaryFallback();
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
 }
 
 export async function endSupportSession(chatId) {
@@ -736,6 +1028,190 @@ export async function endSupportSession(chatId) {
 
   deleteFallbackSession(chatId);
   return null;
+}
+
+export async function closeSupportSession(chatId, options = {}) {
+  const reason = String(options.reason ?? "closed").trim() || "closed";
+  const messageText = String(options.message ?? "").trim();
+  const actor = String(options.actor ?? "system").trim().toLowerCase();
+
+  const session = getSupportSession(chatId);
+  if (!session) {
+    return null;
+  }
+
+  if (session.status === "closed" && session.closedReason === reason) {
+    return session;
+  }
+
+  const updatedAt = nowIso();
+  const systemMessage = messageText
+    ? {
+        id: generateId("msg"),
+        sender: "system",
+        text: messageText,
+        createdAt: updatedAt,
+      }
+    : null;
+
+  const nextSession = normalizeSession(chatId, {
+    ...session,
+    status: "closed",
+    closedReason: reason,
+    updatedAt,
+    typing: {
+      ...(session.typing ?? {}),
+      user: false,
+      admin: false,
+      updatedAt,
+    },
+    activity: {
+      ...(session.activity ?? {}),
+      userAt: actor === "user" ? updatedAt : (session.activity?.userAt ?? updatedAt),
+      adminAt: actor === "admin" ? updatedAt : (session.activity?.adminAt ?? updatedAt),
+    },
+    messages: systemMessage
+      ? [
+          ...(session.messages ?? []),
+          systemMessage,
+        ]
+      : [...(session.messages ?? [])],
+  });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await ensureSupportAuth(true);
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        status: "closed",
+        closedReason: reason,
+        updatedAt,
+        typing: nextSession.typing,
+        activity: nextSession.activity,
+        ...(systemMessage ? { messages: arrayUnion(toWritableMessage(systemMessage)) } : {}),
+      },
+      { merge: true },
+    );
+    disableTemporaryFallback();
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
+}
+
+export async function setSupportTypingState(chatId, actor, isTyping) {
+  const normalizedActor = String(actor ?? "").trim().toLowerCase();
+  if (normalizedActor !== "user" && normalizedActor !== "admin") {
+    return null;
+  }
+
+  const session = getSupportSession(chatId);
+  if (!session || session.status === "closed") {
+    return session ?? null;
+  }
+
+  const updatedAt = nowIso();
+  const nextSession = normalizeSession(chatId, {
+    ...session,
+    updatedAt,
+    typing: {
+      ...(session.typing ?? {}),
+      [normalizedActor]: Boolean(isTyping),
+      updatedAt,
+    },
+    activity: {
+      ...(session.activity ?? {}),
+      ...(isTyping ? { [`${normalizedActor}At`]: updatedAt } : {}),
+    },
+  });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        updatedAt,
+        typing: nextSession.typing,
+        activity: nextSession.activity,
+      },
+      { merge: true },
+    );
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
+}
+
+export async function touchSupportActivity(chatId, actor) {
+  const normalizedActor = String(actor ?? "").trim().toLowerCase();
+  if (normalizedActor !== "user" && normalizedActor !== "admin") {
+    return null;
+  }
+
+  const session = getSupportSession(chatId);
+  if (!session || session.status === "closed") {
+    return session ?? null;
+  }
+
+  const updatedAt = nowIso();
+  const nextSession = normalizeSession(chatId, {
+    ...session,
+    updatedAt,
+    activity: {
+      ...(session.activity ?? {}),
+      [`${normalizedActor}At`]: updatedAt,
+    },
+  });
+
+  upsertFallbackSession(nextSession, false);
+
+  try {
+    await setDoc(
+      doc(db, SUPPORT_CHATS_COLLECTION, chatId),
+      {
+        updatedAt,
+        activity: nextSession.activity,
+      },
+      { merge: true },
+    );
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return nextSession;
+}
+
+export function getSupportSessionIdleExpiration(session, now = Date.now()) {
+  const userAt = new Date(session?.activity?.userAt ?? 0).getTime();
+  const adminAt = new Date(session?.activity?.adminAt ?? 0).getTime();
+
+  if (!Number.isFinite(userAt) || !Number.isFinite(adminAt)) {
+    return null;
+  }
+
+  const userIdleMs = now - userAt;
+  const adminIdleMs = now - adminAt;
+  const isExpired = userIdleMs >= SUPPORT_CHAT_IDLE_TIMEOUT_MS || adminIdleMs >= SUPPORT_CHAT_IDLE_TIMEOUT_MS;
+  if (!isExpired) {
+    return null;
+  }
+
+  const reason = userIdleMs >= SUPPORT_CHAT_IDLE_TIMEOUT_MS && adminIdleMs >= SUPPORT_CHAT_IDLE_TIMEOUT_MS
+    ? "inactivity-both"
+    : userIdleMs >= SUPPORT_CHAT_IDLE_TIMEOUT_MS
+      ? "inactivity-user"
+      : "inactivity-admin";
+
+  return {
+    reason,
+    userIdleMs,
+    adminIdleMs,
+  };
 }
 
 export async function getSupportChatConfig(options = {}) {
@@ -766,6 +1242,7 @@ export function subscribeToSupportChatConfig(onChange, onError, options = {}) {
   const allowAnonymous = options.allowAnonymous ?? true;
   let unsubscribeFirestore = () => {};
   let isCancelled = false;
+  let retryTimerId = null;
 
   const notifyFallback = () => {
     onChange(getFallbackSupportChatConfig());
@@ -782,16 +1259,14 @@ export function subscribeToSupportChatConfig(onChange, onError, options = {}) {
   window.addEventListener("storage", handleStorage);
   window.addEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
 
-  if (isFirestoreTemporarilyDisabled()) {
-    return () => {
-      isCancelled = true;
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
-      unsubscribeFirestore();
-    };
-  }
-
   const startFirestoreSync = async () => {
+    if (isFirestoreTemporarilyDisabled()) {
+      retryTimerId = window.setTimeout(() => {
+        startFirestoreSync();
+      }, FIRESTORE_RETRY_DELAY_MS);
+      return;
+    }
+
     try {
       await ensureSupportAuth(allowAnonymous);
       if (isCancelled) {
@@ -833,6 +1308,9 @@ export function subscribeToSupportChatConfig(onChange, onError, options = {}) {
 
   return () => {
     isCancelled = true;
+    if (retryTimerId) {
+      window.clearTimeout(retryTimerId);
+    }
     window.removeEventListener("storage", handleStorage);
     window.removeEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
     unsubscribeFirestore();

@@ -6,15 +6,20 @@ import { toast } from "sonner";
 import { auth } from "@/lib/firebase";
 import {
   appendAdminMessage,
+   closeSupportSession,
    DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
    DEFAULT_SUPPORT_FAQ_ITEMS,
    DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
    DEFAULT_SUPPORT_WELCOME_MESSAGE,
   endSupportSession,
+   getSupportSessionIdleExpiration,
    saveSupportChatConfig,
+   setSupportTypingState,
   setConversationStatus,
+   SUPPORT_CHAT_IDLE_TIMEOUT_MS,
    subscribeToSupportChatConfig,
   subscribeToSupportSessions,
+   touchSupportActivity,
 } from "@/lib/supportChatService";
 
 const ADMIN_AGENT_NAME_KEY = "vicmar_admin_agent_name";
@@ -56,6 +61,7 @@ export default function AdminMessages() {
   const itemsPerPage = 8;
 
   const supportMessagesRef = useRef(null);
+   const adminTypingDebounceRef = useRef(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -146,6 +152,41 @@ export default function AdminMessages() {
     if (!supportMessagesRef.current) return;
     supportMessagesRef.current.scrollTop = supportMessagesRef.current.scrollHeight;
   }, [activeSupportSessionId, activeSupportSession?.messages?.length]);
+
+   useEffect(() => {
+      return () => {
+         if (adminTypingDebounceRef.current) {
+            window.clearTimeout(adminTypingDebounceRef.current);
+         }
+      };
+   }, []);
+
+   useEffect(() => {
+      if (!activeSupportSessionId || !activeSupportSession) {
+         return;
+      }
+
+      if (activeSupportSession.status === "closed" || !activeSupportSession.liveAgentRequested) {
+         return;
+      }
+
+      const intervalId = window.setInterval(async () => {
+         const expiration = getSupportSessionIdleExpiration(activeSupportSession);
+         if (!expiration) {
+            return;
+         }
+
+         await closeSupportSession(activeSupportSessionId, {
+            reason: "expired",
+            actor: "system",
+            message: "Chat expired due to inactivity. You can review this chat and delete it when done.",
+         });
+      }, 15000);
+
+      return () => {
+         window.clearInterval(intervalId);
+      };
+   }, [activeSupportSession, activeSupportSessionId]);
 
   useEffect(() => {
     const normalizedName = adminAgentName.trim() || "Admin";
@@ -311,24 +352,63 @@ export default function AdminMessages() {
       }
    };
 
-  const handleSendAdminReply = (event) => {
-    event.preventDefault();
-    const nextReply = adminReply.trim();
-    if (!nextReply || !activeSupportSessionId) return;
+   const handleSendAdminReply = (event) => {
+      event.preventDefault();
 
-    appendAdminMessage(activeSupportSessionId, nextReply, adminDisplayName);
-    setAdminReply("");
-  };
+      const sendReply = async () => {
+         const nextReply = adminReply.trim();
+         if (!nextReply || !activeSupportSessionId) return;
 
-  const handleConnectToLiveChat = () => {
-    if (!activeSupportSessionId) return;
-    setConversationStatus(activeSupportSessionId, "agent-connected");
-  };
+         await appendAdminMessage(activeSupportSessionId, nextReply, adminDisplayName);
+         await touchSupportActivity(activeSupportSessionId, "admin");
+         await setSupportTypingState(activeSupportSessionId, "admin", false);
+         setAdminReply("");
+      };
 
-  const handleCloseConversation = async () => {
-    if (!activeSupportSessionId) return;
-    await endSupportSession(activeSupportSessionId);
-  };
+      sendReply();
+   };
+
+   const handleConnectToLiveChat = async () => {
+      if (!activeSupportSessionId) return;
+      await setConversationStatus(activeSupportSessionId, "agent-connected");
+      await touchSupportActivity(activeSupportSessionId, "admin");
+   };
+
+   const handleCloseConversation = async () => {
+      if (!activeSupportSessionId) return;
+      const isDeclined = activeSupportSession?.status === "awaiting-agent";
+      await closeSupportSession(activeSupportSessionId, {
+         reason: isDeclined ? "declined" : "admin-ended",
+         actor: "admin",
+         message: isDeclined
+            ? "Live agent request was declined. Please start a new chat or contact us for further assistance."
+            : "Chat ended by admin. You can review this chat and delete it when done.",
+      });
+   };
+
+   const handleDeleteConversation = async () => {
+      if (!activeSupportSessionId) return;
+      await endSupportSession(activeSupportSessionId);
+      toast.success("Chat deleted.");
+   };
+
+   const handleAdminReplyInputChange = async (value) => {
+      setAdminReply(value);
+      if (!activeSupportSessionId || activeSupportSession?.status === "closed") {
+         return;
+      }
+
+      await setSupportTypingState(activeSupportSessionId, "admin", value.trim().length > 0);
+      await touchSupportActivity(activeSupportSessionId, "admin");
+
+      if (adminTypingDebounceRef.current) {
+         window.clearTimeout(adminTypingDebounceRef.current);
+      }
+
+      adminTypingDebounceRef.current = window.setTimeout(() => {
+         setSupportTypingState(activeSupportSessionId, "admin", false);
+      }, 1200);
+   };
 
   const getSessionStatusClassName = (status) => {
     if (status === "awaiting-agent") return "bg-amber-100 text-amber-700";
@@ -350,6 +430,7 @@ export default function AdminMessages() {
     (currentPage - 1) * itemsPerPage,
     currentPage * itemsPerPage
   );
+   const idleLimitMinutes = Math.floor(SUPPORT_CHAT_IDLE_TIMEOUT_MS / 60000);
 
    return (
       <div className="space-y-6">
@@ -523,7 +604,7 @@ export default function AdminMessages() {
                                               Close Support Session
                                            </AlertDialog.Title>
                                            <AlertDialog.Description className="text-sm text-slate-500">
-                                              Are you sure you want to close this chat with <strong>{activeSupportSession.visitorLabel}</strong>? The user will be notified that the session has ended.
+                                              Are you sure you want to close this chat with <strong>{activeSupportSession.visitorLabel}</strong>? The transcript stays visible until you delete it.
                                            </AlertDialog.Description>
                                         </div>
                                         <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 mt-4">
@@ -536,7 +617,7 @@ export default function AdminMessages() {
                                               <button 
                                                  onClick={async () => {
                                                     await handleCloseConversation();
-                                                    toast.success("Support session closed successfully.");
+                                                    toast.success("Support session closed.");
                                                  }}
                                                  className="inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
                                               >
@@ -547,8 +628,51 @@ export default function AdminMessages() {
                                      </AlertDialog.Content>
                                   </AlertDialog.Portal>
                                </AlertDialog.Root>
+                               {activeSupportSession.status === "closed" ? (
+                                  <AlertDialog.Root>
+                                     <AlertDialog.Trigger asChild>
+                                        <button className="text-[11px] uppercase tracking-wider font-bold rounded-xl px-4 py-2.5 border border-rose-200 text-rose-700 hover:bg-rose-50 transition-all active:scale-[0.98]">
+                                           Delete Chat
+                                        </button>
+                                     </AlertDialog.Trigger>
+                                     <AlertDialog.Portal>
+                                        <AlertDialog.Overlay className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 animate-in fade-in" />
+                                        <AlertDialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-slate-200 bg-white p-6 shadow-lg sm:rounded-3xl animate-in fade-in zoom-in-95">
+                                           <div className="flex flex-col space-y-2 text-center sm:text-left">
+                                              <AlertDialog.Title className="text-lg font-bold text-slate-900">Delete Chat Transcript</AlertDialog.Title>
+                                              <AlertDialog.Description className="text-sm text-slate-500">Delete this transcript permanently after review?</AlertDialog.Description>
+                                           </div>
+                                           <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 mt-4">
+                                              <AlertDialog.Cancel asChild>
+                                                 <button className="mt-2 sm:mt-0 inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-100">Cancel</button>
+                                              </AlertDialog.Cancel>
+                                              <AlertDialog.Action asChild>
+                                                 <button
+                                                    onClick={handleDeleteConversation}
+                                                    className="inline-flex items-center justify-center rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700"
+                                                 >
+                                                    Delete
+                                                 </button>
+                                              </AlertDialog.Action>
+                                           </div>
+                                        </AlertDialog.Content>
+                                     </AlertDialog.Portal>
+                                  </AlertDialog.Root>
+                               ) : null}
                             </div>
                          </div>
+
+                         {activeSupportSession.typing?.user && activeSupportSession.status !== "closed" ? (
+                            <div className="px-6 py-2 border-b border-slate-100 bg-white/70 text-[11px] text-blue-700 font-semibold">
+                               {activeSupportSession.visitorLabel} is typing...
+                            </div>
+                         ) : null}
+
+                         {activeSupportSession.liveAgentRequested && activeSupportSession.status !== "closed" ? (
+                            <div className="px-6 py-2 border-b border-slate-100 bg-amber-50/70 text-[11px] text-amber-700 font-medium">
+                               This live chat auto-expires after about {idleLimitMinutes} minutes of inactivity from either side.
+                            </div>
+                         ) : null}
 
                          {/* Chat Messages */}
                          <div ref={supportMessagesRef} className="flex-1 p-6 overflow-y-auto bg-transparent space-y-5">
@@ -591,7 +715,9 @@ export default function AdminMessages() {
                                   <input
                                      type="text"
                                      value={adminReply}
-                                     onChange={(e) => setAdminReply(e.target.value)}
+                                    onChange={(e) => {
+                                       handleAdminReplyInputChange(e.target.value);
+                                    }}
                                      placeholder="Type your reply here..."
                                      className="w-full bg-transparent text-[15px] focus:outline-none mb-3 font-medium placeholder:text-slate-400"
                                   />

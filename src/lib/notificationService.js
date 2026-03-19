@@ -1,4 +1,4 @@
-import { collection, onSnapshot, query, orderBy, limit } from "firebase/firestore";
+import { collection, onSnapshot } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
 const SLOT_STATUS_COLLECTION = "slotStatuses";
@@ -146,7 +146,7 @@ export function subscribeToAdminNotifications(onNotificationsChange, onError) {
               id: notifId,
               type: "chat_message",
               title: "New Message",
-              message: `${data.visitorLabel || "Visitor"}: "${lastMsg.text?.slice(0, 60)}${lastMsg.text?.length > 60 ? "..." : ""}"`,
+              message: `${data.visitorLabel || "Visitor"} sent a new chat message`,
               timestamp: lastMsg.createdAt || updatedAt.toISOString(),
               read: false,
               icon: "message",
