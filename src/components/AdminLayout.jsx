@@ -16,7 +16,9 @@ import {
   X,
 } from "lucide-react";
 import { auth } from "@/lib/firebase";
+import { isAuthorizedAdminUser } from "@/lib/adminAccess";
 import { createPageUrl } from "@/utils";
+import ModernLoader from "@/components/ModernLoader";
 import { subscribeToAdminNotifications } from "@/lib/notificationService";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Popover from "@radix-ui/react-popover";
@@ -47,6 +49,50 @@ const ADMIN_NAV_ITEMS = [
   },
 ];
 
+const READ_NOTIFICATIONS_STORAGE_KEY = "vicmar_admin_read_notifications";
+const DISMISSED_NOTIFICATIONS_STORAGE_KEY = "vicmar_admin_dismissed_notifications";
+const CLEARED_NOTIFICATIONS_AT_STORAGE_KEY = "vicmar_admin_notifications_cleared_at";
+
+function readStoredStringArray(storageKey) {
+  try {
+    const rawValue = window.localStorage.getItem(storageKey);
+    if (!rawValue) {
+      return [];
+    }
+
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function writeStoredStringArray(storageKey, values) {
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(Array.from(new Set(values))));
+  } catch (error) {
+    // Ignore storage write errors.
+  }
+}
+
+function readStoredNumber(storageKey) {
+  try {
+    const rawValue = window.localStorage.getItem(storageKey);
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) ? parsed : 0;
+  } catch (error) {
+    return 0;
+  }
+}
+
+function writeStoredNumber(storageKey, value) {
+  try {
+    window.localStorage.setItem(storageKey, String(value));
+  } catch (error) {
+    // Ignore storage write errors.
+  }
+}
+
 export default function AdminLayout({ currentPageName, children }) {
   const navigate = useNavigate();
   const [adminUser, setAdminUser] = useState(null);
@@ -56,6 +102,9 @@ export default function AdminLayout({ currentPageName, children }) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
+  const [readNotificationIds, setReadNotificationIds] = useState(() => readStoredStringArray(READ_NOTIFICATIONS_STORAGE_KEY));
+  const [dismissedNotificationIds, setDismissedNotificationIds] = useState(() => readStoredStringArray(DISMISSED_NOTIFICATIONS_STORAGE_KEY));
+  const [clearedNotificationsAt, setClearedNotificationsAt] = useState(() => readStoredNumber(CLEARED_NOTIFICATIONS_AT_STORAGE_KEY));
   const [settingsTab, setSettingsTab] = useState("password");
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -74,10 +123,66 @@ export default function AdminLayout({ currentPageName, children }) {
     return unsubscribe;
   }, [adminUser]);
 
-  const unreadCount = useMemo(() => notifications.filter((n) => !n.read).length, [notifications]);
+  const visibleNotifications = useMemo(() => {
+    const dismissedIds = new Set(dismissedNotificationIds);
+
+    return notifications.filter((notification) => {
+      if (dismissedIds.has(notification.id)) {
+        return false;
+      }
+
+      if (!clearedNotificationsAt) {
+        return true;
+      }
+
+      const timestamp = new Date(notification.timestamp).getTime();
+      return !Number.isFinite(timestamp) || timestamp > clearedNotificationsAt;
+    });
+  }, [notifications, dismissedNotificationIds, clearedNotificationsAt]);
+
+  const unreadCount = useMemo(() => {
+    const readIds = new Set(readNotificationIds);
+    return visibleNotifications.filter((notification) => !notification.read && !readIds.has(notification.id)).length;
+  }, [visibleNotifications, readNotificationIds]);
 
   const markAllRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    const idsToRead = visibleNotifications.filter((notification) => !notification.read).map((notification) => notification.id);
+    if (!idsToRead.length) {
+      return;
+    }
+
+    setReadNotificationIds((prev) => {
+      const next = Array.from(new Set([...prev, ...idsToRead]));
+      writeStoredStringArray(READ_NOTIFICATIONS_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const removeNotification = (notificationId) => {
+    if (!notificationId) {
+      return;
+    }
+
+    setDismissedNotificationIds((prev) => {
+      const next = Array.from(new Set([...prev, notificationId]));
+      writeStoredStringArray(DISMISSED_NOTIFICATIONS_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const clearAllNotifications = () => {
+    const now = Date.now();
+    setClearedNotificationsAt(now);
+    writeStoredNumber(CLEARED_NOTIFICATIONS_AT_STORAGE_KEY, now);
+
+    const visibleIds = visibleNotifications.map((notification) => notification.id);
+    if (visibleIds.length > 0) {
+      setReadNotificationIds((prev) => {
+        const next = Array.from(new Set([...prev, ...visibleIds]));
+        writeStoredStringArray(READ_NOTIFICATIONS_STORAGE_KEY, next);
+        return next;
+      });
+    }
   };
 
   const formatTimeAgo = (timestamp) => {
@@ -93,11 +198,14 @@ export default function AdminLayout({ currentPageName, children }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      const validAdminUser = user && !user.isAnonymous ? user : null;
+      const validAdminUser = isAuthorizedAdminUser(user) ? user : null;
       setAdminUser(validAdminUser);
       setIsCheckingAuth(false);
 
       if (!validAdminUser) {
+        if (user) {
+          signOut(auth).catch((error) => console.error(error));
+        }
         navigate(createPageUrl("AdminLogin"), { replace: true });
       }
     });
@@ -199,10 +307,10 @@ export default function AdminLayout({ currentPageName, children }) {
 
   if (isCheckingAuth) {
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center gap-4 px-4 overflow-hidden">
-        <div className="w-10 h-10 border-4 border-[#15803d] border-t-emerald-400 rounded-full animate-spin" />
-        <p className="text-sm text-slate-400 font-medium tracking-wide">Loading administration panel...</p>
-      </div>
+      <ModernLoader
+        title="Loading administration panel"
+        subtitle="Validating secure admin session..."
+      />
     );
   }
 
@@ -471,18 +579,32 @@ export default function AdminLayout({ currentPageName, children }) {
                   <div className="absolute right-0 top-12 z-50 w-80 bg-white rounded-2xl shadow-xl border border-slate-100 outline-none animate-in fade-in slide-in-from-top-2 duration-200 overflow-hidden">
                     <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
                       <h3 className="text-sm font-bold text-slate-800">Notifications {unreadCount > 0 && <span className="text-xs text-white bg-red-500 rounded-full px-1.5 py-0.5 ml-1">{unreadCount}</span>}</h3>
-                      {unreadCount > 0 && <button onClick={markAllRead} className="text-[10px] font-bold text-[#15803d] uppercase tracking-wider hover:underline">Mark all read</button>}
+                      <div className="flex items-center gap-2">
+                        {unreadCount > 0 && (
+                          <button onClick={markAllRead} className="text-[10px] font-bold text-[#15803d] uppercase tracking-wider hover:underline">
+                            Mark all read
+                          </button>
+                        )}
+                        {visibleNotifications.length > 0 && (
+                          <button onClick={clearAllNotifications} className="text-[10px] font-bold text-rose-600 uppercase tracking-wider hover:underline">
+                            Clear all
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="max-h-64 overflow-y-auto">
-                      {notifications.length === 0 ? (
+                      {visibleNotifications.length === 0 ? (
                         <div className="p-3 text-center py-8">
                           <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-2 shadow-inner"><Bell className="w-5 h-5 text-slate-300" /></div>
                           <p className="text-sm font-bold text-slate-700">No notifications yet</p>
                           <p className="text-xs font-medium text-slate-500 mt-1">Activity will appear here.</p>
                         </div>
                       ) : (
-                        notifications.slice(0, 10).map((n) => (
-                          <div key={n.id} className={`px-4 py-3 border-b border-slate-50 last:border-0 flex items-start gap-3 transition-colors ${n.read ? 'bg-white' : 'bg-green-50/40'}`}>
+                        visibleNotifications.slice(0, 10).map((n) => {
+                          const isRead = n.read || readNotificationIds.includes(n.id);
+
+                          return (
+                          <div key={n.id} className={`px-4 py-3 border-b border-slate-50 last:border-0 flex items-start gap-3 transition-colors ${isRead ? 'bg-white' : 'bg-green-50/40'}`}>
                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${n.icon === 'message' ? 'bg-blue-50 text-blue-500' : 'bg-emerald-50 text-emerald-600'}`}>
                               {n.icon === 'message' ? <MsgIcon className="w-4 h-4" /> : <MapPinIcon className="w-4 h-4" />}
                             </div>
@@ -491,9 +613,20 @@ export default function AdminLayout({ currentPageName, children }) {
                               <p className="text-[11px] text-slate-500 mt-0.5 leading-snug truncate">{n.message}</p>
                               <p className="text-[10px] text-slate-400 mt-1">{formatTimeAgo(n.timestamp)}</p>
                             </div>
-                            {!n.read && <div className="w-2 h-2 rounded-full bg-[#15803d] mt-2 flex-shrink-0" />}
+                            <div className="flex items-start gap-2 mt-1">
+                              {!isRead && <div className="w-2 h-2 rounded-full bg-[#15803d] mt-1 flex-shrink-0" />}
+                              <button
+                                onClick={() => removeNotification(n.id)}
+                                className="text-slate-400 hover:text-rose-600 transition-colors"
+                                aria-label="Remove notification"
+                                title="Remove"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
                   </div>
@@ -580,18 +713,32 @@ export default function AdminLayout({ currentPageName, children }) {
                       <div className="absolute right-0 top-14 z-50 w-96 bg-white/95 backdrop-blur-xl rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-white/60 outline-none animate-in fade-in slide-in-from-top-2 duration-200 overflow-hidden">
                         <div className="px-5 py-4 border-b border-white/40 bg-white/40 flex items-center justify-between">
                           <h3 className="text-sm font-bold text-slate-800">Notifications {unreadCount > 0 && <span className="text-xs text-white bg-red-500 rounded-full px-1.5 py-0.5 ml-1">{unreadCount}</span>}</h3>
-                          {unreadCount > 0 && <button className="text-[10px] font-bold text-[#15803d] uppercase tracking-wider hover:underline" onClick={() => { markAllRead(); }}>Mark all read</button>}
+                          <div className="flex items-center gap-2">
+                            {unreadCount > 0 && (
+                              <button className="text-[10px] font-bold text-[#15803d] uppercase tracking-wider hover:underline" onClick={() => { markAllRead(); }}>
+                                Mark all read
+                              </button>
+                            )}
+                            {visibleNotifications.length > 0 && (
+                              <button className="text-[10px] font-bold text-rose-600 uppercase tracking-wider hover:underline" onClick={() => { clearAllNotifications(); }}>
+                                Clear all
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <div className="max-h-80 overflow-y-auto">
-                          {notifications.length === 0 ? (
+                          {visibleNotifications.length === 0 ? (
                             <div className="p-3 text-center py-12 bg-white/20">
                               <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3 shadow-inner"><Bell className="w-6 h-6 text-slate-300" /></div>
                               <p className="text-sm font-bold text-slate-700">No notifications yet</p>
                               <p className="text-xs font-medium text-slate-500 mt-1">Slot changes and chat requests will appear here.</p>
                             </div>
                           ) : (
-                            notifications.slice(0, 15).map((n) => (
-                              <div key={n.id} className={`px-5 py-3.5 border-b border-slate-50/80 last:border-0 flex items-start gap-3 transition-colors hover:bg-slate-50/50 cursor-default ${n.read ? '' : 'bg-green-50/30'}`}>
+                            visibleNotifications.slice(0, 15).map((n) => {
+                              const isRead = n.read || readNotificationIds.includes(n.id);
+
+                              return (
+                              <div key={n.id} className={`px-5 py-3.5 border-b border-slate-50/80 last:border-0 flex items-start gap-3 transition-colors hover:bg-slate-50/50 cursor-default ${isRead ? '' : 'bg-green-50/30'}`}>
                                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5 ${n.icon === 'message' ? 'bg-blue-50 text-blue-500 border border-blue-100' : 'bg-emerald-50 text-emerald-600 border border-emerald-100'}`}>
                                   {n.icon === 'message' ? <MsgIcon className="w-4 h-4" /> : <MapPinIcon className="w-4 h-4" />}
                                 </div>
@@ -602,9 +749,20 @@ export default function AdminLayout({ currentPageName, children }) {
                                   </div>
                                   <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">{n.message}</p>
                                 </div>
-                                {!n.read && <div className="w-2 h-2 rounded-full bg-[#15803d] mt-2 flex-shrink-0" />}
+                                <div className="flex items-start gap-2 mt-0.5">
+                                  {!isRead && <div className="w-2 h-2 rounded-full bg-[#15803d] mt-2 flex-shrink-0" />}
+                                  <button
+                                    onClick={() => removeNotification(n.id)}
+                                    className="text-slate-400 hover:text-rose-600 transition-colors"
+                                    aria-label="Remove notification"
+                                    title="Remove"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               </div>
-                            ))
+                              );
+                            })
                           )}
                         </div>
                       </div>

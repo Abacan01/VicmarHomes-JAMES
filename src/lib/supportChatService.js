@@ -11,10 +11,45 @@ import { signInAnonymously } from "firebase/auth";
 import { auth, db } from "@/lib/firebase";
 
 const SUPPORT_CHATS_COLLECTION = "supportChats";
+const SUPPORT_CHAT_CONFIG_COLLECTION = "supportChatConfig";
+const SUPPORT_CHAT_CONFIG_DOC = "faqAssistant";
 const SUPPORT_ACTIVE_SESSION_KEY = "vicmar_support_active_session";
 const SUPPORT_VISITOR_ID_KEY = "vicmar_support_visitor_id";
 const SUPPORT_CHATS_FALLBACK_KEY = "vicmar_support_chats_fallback";
+const SUPPORT_CHAT_CONFIG_FALLBACK_KEY = "vicmar_support_chat_config_fallback";
+const SUPPORT_FORCE_FALLBACK_UNTIL_KEY = "vicmar_support_force_fallback_until";
 const LOCAL_CHANGE_EVENT = "vicmar-support-chat-updated";
+const LOCAL_CONFIG_CHANGE_EVENT = "vicmar-support-chat-config-updated";
+const MAX_SUPPORT_MESSAGE_LENGTH = 320;
+const FORCE_FALLBACK_DURATION_MS = 10 * 60 * 1000;
+
+export const DEFAULT_SUPPORT_WELCOME_MESSAGE = "Hi! I am Vicmar assistant. Choose a question below or type your own question.";
+export const DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE = "Live agent request submitted. An admin will reply here soon.";
+
+export const DEFAULT_SUPPORT_FAQ_ITEMS = [
+  {
+    id: "faq-payment-methods",
+    question: "What payment methods are available?",
+    answer: "We offer flexible payment options including bank financing, Pag-IBIG financing, in-house financing, and spot cash payments with discounts. Our sales team can help you find the best payment plan that suits your budget.",
+  },
+  {
+    id: "faq-amenities",
+    question: "What amenities are included in the community?",
+    answer: "Vicmar Homes features communal greenways with food gardens, vermicompost areas, playgrounds, and open spaces. Each home includes garden space for food and herb production, with options for vertical gardens, aquaponics, and rainwater tanks.",
+  },
+  {
+    id: "faq-purchase-process",
+    question: "How does the purchase process work?",
+    answer: "The process starts with a site visit and property selection. After choosing your home, you will complete the reservation with a minimal fee, submit requirements for financing, and upon approval, sign the contract to sell. Our team guides you through every step.",
+  },
+  {
+    id: "faq-maintenance-fees",
+    question: "Are there maintenance fees?",
+    answer: "Yes, there are association dues for the upkeep of common areas including the greenways, communal gardens, and shared facilities. These fees ensure the sustainable features of the community are properly maintained for all residents.",
+  },
+];
+
+export const DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER = "Thanks for your question. I can help with payment options, amenities, purchase process, and fees. If you need more help, tap Request live agent.";
 
 let supportSessionsCache = [];
 let supportAuthPromise = null;
@@ -35,7 +70,33 @@ function isPermissionDeniedError(error) {
   return error?.code === "permission-denied" || String(error?.message ?? "").includes("Missing or insufficient permissions");
 }
 
+function getForcedFallbackUntil() {
+  const rawValue = localStorage.getItem(SUPPORT_FORCE_FALLBACK_UNTIL_KEY);
+  const parsedValue = Number(rawValue);
+  return Number.isFinite(parsedValue) ? parsedValue : 0;
+}
+
+function isFirestoreTemporarilyDisabled() {
+  return getForcedFallbackUntil() > Date.now();
+}
+
+function enableTemporaryFallback() {
+  localStorage.setItem(
+    SUPPORT_FORCE_FALLBACK_UNTIL_KEY,
+    String(Date.now() + FORCE_FALLBACK_DURATION_MS),
+  );
+}
+
+function disableTemporaryFallback() {
+  localStorage.removeItem(SUPPORT_FORCE_FALLBACK_UNTIL_KEY);
+}
+
 function logUnexpectedError(error) {
+  if (isPermissionDeniedError(error)) {
+    enableTemporaryFallback();
+    return;
+  }
+
   if (!isPermissionDeniedError(error)) {
     console.error(error);
   }
@@ -68,6 +129,53 @@ async function ensureSupportAuth(allowAnonymous = true) {
 
 function generateId(prefix = "id") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeFaqEntry(rawEntry, index = 0) {
+  const question = String(rawEntry?.question ?? "").trim();
+  const answer = String(rawEntry?.answer ?? "").trim();
+  if (!question || !answer) {
+    return null;
+  }
+
+  return {
+    id: String(rawEntry?.id ?? `faq-${index + 1}`),
+    question,
+    answer,
+  };
+}
+
+function normalizeSupportChatConfig(rawConfig) {
+  const nextFallbackReply = String(rawConfig?.fallbackReply ?? "").trim() || DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER;
+  const nextFaqItems = Array.isArray(rawConfig?.faqItems)
+    ? rawConfig.faqItems
+      .map((entry, index) => sanitizeFaqEntry(entry, index))
+      .filter(Boolean)
+    : [];
+  const nextWelcomeMessage = String(rawConfig?.automationMessages?.welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE;
+  const nextLiveAgentRequestedMessage = String(rawConfig?.automationMessages?.liveAgentRequestedMessage ?? "").trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE;
+
+  return {
+    faqItems: nextFaqItems.length > 0 ? nextFaqItems : DEFAULT_SUPPORT_FAQ_ITEMS,
+    fallbackReply: nextFallbackReply,
+    automationMessages: {
+      welcomeMessage: nextWelcomeMessage,
+      liveAgentRequestedMessage: nextLiveAgentRequestedMessage,
+    },
+    updatedAt: String(rawConfig?.updatedAt ?? nowIso()),
+  };
+}
+
+function getFallbackSupportChatConfig() {
+  const rawValue = localStorage.getItem(SUPPORT_CHAT_CONFIG_FALLBACK_KEY);
+  return normalizeSupportChatConfig(safeParse(rawValue, {}));
+}
+
+function saveFallbackSupportChatConfig(config, shouldBroadcast = true) {
+  localStorage.setItem(SUPPORT_CHAT_CONFIG_FALLBACK_KEY, JSON.stringify(normalizeSupportChatConfig(config)));
+  if (shouldBroadcast) {
+    window.dispatchEvent(new Event(LOCAL_CONFIG_CHANGE_EVENT));
+  }
 }
 
 function getFallbackSessions() {
@@ -209,7 +317,7 @@ function stripSessionForWrite(session) {
   };
 }
 
-function createSessionObject(visitorId) {
+function createSessionObject(visitorId, welcomeMessage = DEFAULT_SUPPORT_WELCOME_MESSAGE) {
   const resolvedVisitorId = String(visitorId || getOrCreateVisitorId());
   const sessionId = generateId("chat");
   const createdAt = nowIso();
@@ -223,7 +331,7 @@ function createSessionObject(visitorId) {
     visitorId: resolvedVisitorId,
     visitorLabel: `Visitor ${resolvedVisitorId.slice(-4).toUpperCase()}`,
     messages: [
-      createBotMessage("Hi! I am Vicmar assistant. Choose a question below or type your own question."),
+      createBotMessage(String(welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE),
     ],
   };
 }
@@ -232,6 +340,10 @@ async function mutateSession(chatId, mutator, options = {}) {
   const sessionRef = doc(db, SUPPORT_CHATS_COLLECTION, chatId);
   const fallbackSession = getFallbackSessionById(chatId);
   const allowAnonymous = options.allowAnonymous ?? true;
+
+  if (isFirestoreTemporarilyDisabled()) {
+    return mutateFallbackSession(chatId, mutator);
+  }
 
   try {
     const user = await ensureSupportAuth(allowAnonymous);
@@ -264,13 +376,15 @@ async function mutateSession(chatId, mutator, options = {}) {
       return mutatedSession;
     });
 
+    disableTemporaryFallback();
+
     if (nextSession) {
       upsertFallbackSession(nextSession, false);
     }
 
     return nextSession;
   } catch (error) {
-    console.error(error);
+    logUnexpectedError(error);
     return mutateFallbackSession(chatId, mutator);
   }
 }
@@ -286,23 +400,27 @@ export async function getOrCreateActiveSupportSession() {
     const fallbackSession = getFallbackSessionById(activeId);
     let fallbackCandidate = fallbackSession;
 
-    try {
-      await ensureSupportAuth();
-      const snapshot = await getDoc(doc(db, SUPPORT_CHATS_COLLECTION, activeId));
-      if (snapshot.exists()) {
-        const nextSession = normalizeSession(snapshot.id, snapshot.data());
-        upsertFallbackSession(nextSession, false);
-        return nextSession;
-      }
-    } catch (error) {
-      if (isPermissionDeniedError(error)) {
-        if (localStorage.getItem(SUPPORT_ACTIVE_SESSION_KEY) === activeId) {
-          localStorage.removeItem(SUPPORT_ACTIVE_SESSION_KEY);
+    if (!isFirestoreTemporarilyDisabled()) {
+      try {
+        await ensureSupportAuth();
+        const snapshot = await getDoc(doc(db, SUPPORT_CHATS_COLLECTION, activeId));
+        if (snapshot.exists()) {
+          const nextSession = normalizeSession(snapshot.id, snapshot.data());
+          upsertFallbackSession(nextSession, false);
+          disableTemporaryFallback();
+          return nextSession;
         }
-        deleteFallbackSession(activeId, false);
-        fallbackCandidate = null;
-      } else {
-        logUnexpectedError(error);
+      } catch (error) {
+        if (isPermissionDeniedError(error)) {
+          enableTemporaryFallback();
+          if (localStorage.getItem(SUPPORT_ACTIVE_SESSION_KEY) === activeId) {
+            localStorage.removeItem(SUPPORT_ACTIVE_SESSION_KEY);
+          }
+          deleteFallbackSession(activeId, false);
+          fallbackCandidate = null;
+        } else {
+          logUnexpectedError(error);
+        }
       }
     }
 
@@ -316,6 +434,8 @@ export async function getOrCreateActiveSupportSession() {
 
 export async function createSupportSession() {
   let authVisitorId = "";
+  const supportConfig = await getSupportChatConfig({ allowAnonymous: true });
+  const welcomeMessage = supportConfig?.automationMessages?.welcomeMessage ?? DEFAULT_SUPPORT_WELCOME_MESSAGE;
 
   try {
     const user = await ensureSupportAuth();
@@ -327,20 +447,23 @@ export async function createSupportSession() {
     logUnexpectedError(error);
   }
 
-  const newSession = createSessionObject(authVisitorId);
+  const newSession = createSessionObject(authVisitorId, welcomeMessage);
 
-  try {
-    if (!auth.currentUser) {
-      await ensureSupportAuth();
+  if (!isFirestoreTemporarilyDisabled()) {
+    try {
+      if (!auth.currentUser) {
+        await ensureSupportAuth();
+      }
+
+      await setDoc(
+        doc(db, SUPPORT_CHATS_COLLECTION, newSession.id),
+        stripSessionForWrite(newSession),
+        { merge: true },
+      );
+      disableTemporaryFallback();
+    } catch (error) {
+      logUnexpectedError(error);
     }
-
-    await setDoc(
-      doc(db, SUPPORT_CHATS_COLLECTION, newSession.id),
-      stripSessionForWrite(newSession),
-      { merge: true },
-    );
-  } catch (error) {
-    logUnexpectedError(error);
   }
 
   upsertFallbackSession(newSession);
@@ -400,6 +523,12 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
   const unsubscribeFallback = subscribeToFallbackSessions(onChange, { chatId: scopedChatId });
   let unsubscribeFirestore = () => {};
 
+  if (isFirestoreTemporarilyDisabled()) {
+    return () => {
+      unsubscribeFallback();
+    };
+  }
+
   let fallbackEnabled = false;
 
   const enableFallbackOnly = (error) => {
@@ -436,6 +565,7 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
 
             const nextSession = normalizeSession(snapshot.id, snapshot.data());
             upsertFallbackSession(nextSession, false);
+            disableTemporaryFallback();
             onChange([nextSession]);
           },
           (error) => {
@@ -455,6 +585,7 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
 
             supportSessionsCache = sortByUpdatedAtDesc(nextSessions);
             saveFallbackSessions(supportSessionsCache, false);
+            disableTemporaryFallback();
             onChange(supportSessionsCache);
           },
           (error) => {
@@ -477,7 +608,7 @@ export function subscribeToSupportSessions(onChange, onError, options = {}) {
 }
 
 export async function appendUserMessage(chatId, text) {
-  const trimmed = String(text ?? "").trim();
+  const trimmed = String(text ?? "").trim().slice(0, MAX_SUPPORT_MESSAGE_LENGTH);
   if (!trimmed) {
     return null;
   }
@@ -525,6 +656,11 @@ export async function appendBotMessage(chatId, text) {
 }
 
 export async function requestLiveAgent(chatId) {
+  const supportConfig = await getSupportChatConfig({ allowAnonymous: true });
+  const liveAgentRequestedMessage = String(
+    supportConfig?.automationMessages?.liveAgentRequestedMessage ?? DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+  ).trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE;
+
   return await mutateSession(chatId, (session) => {
     if (session.liveAgentRequested) {
       return session;
@@ -542,7 +678,7 @@ export async function requestLiveAgent(chatId) {
         {
           id: generateId("msg"),
           sender: "system",
-          text: "Live agent request submitted. An admin will reply here soon.",
+          text: liveAgentRequestedMessage,
           createdAt,
         },
       ],
@@ -600,4 +736,130 @@ export async function endSupportSession(chatId) {
 
   deleteFallbackSession(chatId);
   return null;
+}
+
+export async function getSupportChatConfig(options = {}) {
+  const allowAnonymous = options.allowAnonymous ?? true;
+  const fallbackConfig = getFallbackSupportChatConfig();
+
+  if (isFirestoreTemporarilyDisabled()) {
+    return fallbackConfig;
+  }
+
+  try {
+    await ensureSupportAuth(allowAnonymous);
+    const snapshot = await getDoc(doc(db, SUPPORT_CHAT_CONFIG_COLLECTION, SUPPORT_CHAT_CONFIG_DOC));
+    if (snapshot.exists()) {
+      const nextConfig = normalizeSupportChatConfig(snapshot.data());
+      saveFallbackSupportChatConfig(nextConfig, false);
+      disableTemporaryFallback();
+      return nextConfig;
+    }
+  } catch (error) {
+    logUnexpectedError(error);
+  }
+
+  return fallbackConfig;
+}
+
+export function subscribeToSupportChatConfig(onChange, onError, options = {}) {
+  const allowAnonymous = options.allowAnonymous ?? true;
+  let unsubscribeFirestore = () => {};
+  let isCancelled = false;
+
+  const notifyFallback = () => {
+    onChange(getFallbackSupportChatConfig());
+  };
+
+  const handleStorage = (event) => {
+    if (event.key && event.key !== SUPPORT_CHAT_CONFIG_FALLBACK_KEY) {
+      return;
+    }
+    notifyFallback();
+  };
+
+  notifyFallback();
+  window.addEventListener("storage", handleStorage);
+  window.addEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
+
+  if (isFirestoreTemporarilyDisabled()) {
+    return () => {
+      isCancelled = true;
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
+      unsubscribeFirestore();
+    };
+  }
+
+  const startFirestoreSync = async () => {
+    try {
+      await ensureSupportAuth(allowAnonymous);
+      if (isCancelled) {
+        return;
+      }
+
+      const configDocRef = doc(db, SUPPORT_CHAT_CONFIG_COLLECTION, SUPPORT_CHAT_CONFIG_DOC);
+      unsubscribeFirestore = onSnapshot(
+        configDocRef,
+        (snapshot) => {
+          if (!snapshot.exists()) {
+            const defaultConfig = normalizeSupportChatConfig({});
+            saveFallbackSupportChatConfig(defaultConfig, false);
+            onChange(defaultConfig);
+            return;
+          }
+
+          const nextConfig = normalizeSupportChatConfig(snapshot.data());
+          saveFallbackSupportChatConfig(nextConfig, false);
+          disableTemporaryFallback();
+          onChange(nextConfig);
+        },
+        (error) => {
+          logUnexpectedError(error);
+          if (onError) {
+            onError(error);
+          }
+        },
+      );
+    } catch (error) {
+      logUnexpectedError(error);
+      if (onError) {
+        onError(error);
+      }
+    }
+  };
+
+  startFirestoreSync();
+
+  return () => {
+    isCancelled = true;
+    window.removeEventListener("storage", handleStorage);
+    window.removeEventListener(LOCAL_CONFIG_CHANGE_EVENT, notifyFallback);
+    unsubscribeFirestore();
+  };
+}
+
+export async function saveSupportChatConfig(rawConfig, options = {}) {
+  const allowAnonymous = options.allowAnonymous ?? false;
+  const normalizedConfig = normalizeSupportChatConfig({
+    ...rawConfig,
+    updatedAt: nowIso(),
+  });
+
+  if (isFirestoreTemporarilyDisabled()) {
+    saveFallbackSupportChatConfig(normalizedConfig);
+    return normalizedConfig;
+  }
+
+  try {
+    await ensureSupportAuth(allowAnonymous);
+    await setDoc(doc(db, SUPPORT_CHAT_CONFIG_COLLECTION, SUPPORT_CHAT_CONFIG_DOC), normalizedConfig, { merge: true });
+    disableTemporaryFallback();
+  } catch (error) {
+    logUnexpectedError(error);
+    throw error;
+  }
+
+  saveFallbackSupportChatConfig(normalizedConfig);
+  return normalizedConfig;
 }

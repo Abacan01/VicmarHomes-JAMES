@@ -136,6 +136,105 @@ function pointsToSvg(points) {
   return points.map((point) => `${point.x},${point.y}`).join(" ");
 }
 
+function getDistance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.hypot(dx, dy);
+}
+
+function getMidpoint(a, b) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
+function interpolatePoint(a, b, t) {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  };
+}
+
+function normalizeQuadPoints(points) {
+  if (points.length !== 4) {
+    return points;
+  }
+
+  const sortedByY = [...points].sort((pointA, pointB) => {
+    if (pointA.y !== pointB.y) {
+      return pointA.y - pointB.y;
+    }
+
+    return pointA.x - pointB.x;
+  });
+
+  const topTwo = [sortedByY[0], sortedByY[1]].sort((pointA, pointB) => pointA.x - pointB.x);
+  const bottomTwo = [sortedByY[2], sortedByY[3]].sort((pointA, pointB) => pointA.x - pointB.x);
+
+  const topLeft = topTwo[0];
+  const topRight = topTwo[1];
+  const bottomLeft = bottomTwo[0];
+  const bottomRight = bottomTwo[1];
+
+  return [topLeft, bottomLeft, bottomRight, topRight];
+}
+
+function splitQuadIntoUnitPolygons(points, unitCount) {
+  if (points.length !== 4 || unitCount <= 1) {
+    return [points];
+  }
+
+  const [p0, p1, p2, p3] = normalizeQuadPoints(points);
+  const pairA = (getDistance(p0, p1) + getDistance(p2, p3)) / 2;
+  const pairB = (getDistance(p1, p2) + getDistance(p3, p0)) / 2;
+  const polygons = [];
+  const shouldUseColumnSplit = unitCount >= 3 || pairB <= pairA;
+
+  if (shouldUseColumnSplit) {
+    for (let index = 0; index < unitCount; index += 1) {
+      const startT = index / unitCount;
+      const endT = (index + 1) / unitCount;
+      polygons.push([
+        interpolatePoint(p0, p3, startT),
+        interpolatePoint(p1, p2, startT),
+        interpolatePoint(p1, p2, endT),
+        interpolatePoint(p0, p3, endT),
+      ]);
+    }
+
+    return polygons;
+  }
+
+  for (let index = 0; index < unitCount; index += 1) {
+    const startT = index / unitCount;
+    const endT = (index + 1) / unitCount;
+    polygons.push([
+      interpolatePoint(p0, p1, startT),
+      interpolatePoint(p0, p1, endT),
+      interpolatePoint(p3, p2, endT),
+      interpolatePoint(p3, p2, startT),
+    ]);
+  }
+
+  return polygons;
+}
+
+function getPropertyOutlinePolygons(property, propertySlots) {
+  if (Array.isArray(property.outlineCoords) && property.outlineCoords.length > 0) {
+    return property.outlineCoords.map(parseCoords);
+  }
+
+  const points = parseCoords(property.coords);
+  const shouldAutoSplit = propertySlots.length > 1 && points.length === 4;
+
+  if (shouldAutoSplit) {
+    return splitQuadIntoUnitPolygons(points, propertySlots.length);
+  }
+
+  return [points];
+}
+
 function hexToRgba(hexColor, opacity) {
   const clean = String(hexColor ?? "").replace("#", "").trim();
   if (clean.length !== 6) {
@@ -175,6 +274,16 @@ function getAreaVisual(slots) {
   };
 }
 
+function getSlotVisual(slot) {
+  const statusMeta = slot?.currentMeta ?? getSlotStatusMeta(slot?.currentStatus);
+
+  return {
+    fill: hexToRgba(statusMeta.color, 0.28),
+    hoverFill: hexToRgba(statusMeta.color, 0.45),
+    stroke: statusMeta.color,
+  };
+}
+
 function formatPhp(value) {
   if (value === null || value === undefined || value === "") {
     return "-";
@@ -192,6 +301,20 @@ function formatPhp(value) {
   }).format(numericValue);
 }
 
+function getStatusSelectClass(statusValue) {
+  const normalizedStatus = normalizeSlotStatus(statusValue);
+
+  if (normalizedStatus === "available") {
+    return "border-emerald-200 bg-emerald-50/80 text-emerald-700";
+  }
+
+  if (normalizedStatus === "reserved") {
+    return "border-amber-200 bg-amber-50/80 text-amber-700";
+  }
+
+  return "border-rose-200 bg-rose-50/80 text-rose-700";
+}
+
 export default function AdminSlots() {
   const [statusOverrides, setStatusOverrides] = useState({});
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
@@ -205,8 +328,22 @@ export default function AdminSlots() {
   const [slotEditForm, setSlotEditForm] = useState(EMPTY_EDIT_FORM);
   const [savingDetailSlotId, setSavingDetailSlotId] = useState("");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
-  const [hoveredPropertyId, setHoveredPropertyId] = useState("");
+  const [selectedSlotId, setSelectedSlotId] = useState("");
+  const [hoveredMapTargetKey, setHoveredMapTargetKey] = useState("");
   const editPanelRef = useRef(null);
+
+  const mergeLocalSlotOverride = (slotId, patch) => {
+    setStatusOverrides((prev) => {
+      const current = prev[slotId] ?? {};
+      return {
+        ...prev,
+        [slotId]: {
+          ...current,
+          ...patch,
+        },
+      };
+    });
+  };
 
   const allProperties = useMemo(() => getAllVicinityProperties(), []);
   const allSlots = useMemo(() => buildVicinitySlots(allProperties), [allProperties]);
@@ -298,7 +435,7 @@ export default function AdminSlots() {
 
     const propertySlots = slotsByPropertyId[selectedProperty.id] ?? [];
 
-    return [...propertySlots].sort((slotA, slotB) => {
+    const sortedSlots = [...propertySlots].sort((slotA, slotB) => {
       const lotDifference = extractLotSortValue(slotA.lotNum) - extractLotSortValue(slotB.lotNum);
       if (lotDifference !== 0) {
         return lotDifference;
@@ -306,7 +443,21 @@ export default function AdminSlots() {
 
       return String(slotA.lotNum).localeCompare(String(slotB.lotNum));
     });
-  }, [selectedProperty, slotsByPropertyId]);
+
+    if (!selectedSlotId) {
+      return sortedSlots;
+    }
+
+    return sortedSlots.filter((slot) => slot.slotId === selectedSlotId);
+  }, [selectedProperty, selectedSlotId, slotsByPropertyId]);
+
+  const selectedSlot = useMemo(() => {
+    if (!selectedSlotId) {
+      return null;
+    }
+
+    return slotsWithStatus.find((slot) => slot.slotId === selectedSlotId) ?? null;
+  }, [selectedSlotId, slotsWithStatus]);
 
   const propertyTypeOptions = useMemo(() => {
     const allTypes = slotsWithStatus
@@ -317,10 +468,17 @@ export default function AdminSlots() {
   }, [slotsWithStatus]);
 
   useEffect(() => {
-    if (!selectedPropertyId && allProperties.length > 0) {
-      setSelectedPropertyId(allProperties[0].id);
+    if (!selectedSlotId || !selectedPropertyId) {
+      return;
     }
-  }, [allProperties, selectedPropertyId]);
+
+    const selectedPropertySlotsList = slotsByPropertyId[selectedPropertyId] ?? [];
+    const slotStillBelongsToProperty = selectedPropertySlotsList.some((slot) => slot.slotId === selectedSlotId);
+
+    if (!slotStillBelongsToProperty) {
+      setSelectedSlotId("");
+    }
+  }, [selectedPropertyId, selectedSlotId, slotsByPropertyId]);
 
   const getSlotTableFieldValue = (slot, fieldKey) => {
     if (fieldKey === "lotNum") {
@@ -444,6 +602,21 @@ export default function AdminSlots() {
 
     try {
       await updateSlotStatus(slot, status, auth.currentUser?.email ?? "admin");
+
+      // Reflect status update immediately while awaiting snapshot propagation.
+      mergeLocalSlotOverride(slot.slotId, {
+        status,
+        lotNum: slot.lotNum,
+        lotArea: slot.lotArea,
+        price: slot.price,
+        blockNum: slot.blockNum,
+        phase: slot.phase,
+        type: slot.type,
+        unitKey: slot.unitKey,
+        sourceKey: slot.sourceKey,
+        propertyId: slot.propertyId,
+      });
+
       toast.success(`Lot ${slot.lotNum} status updated to ${status}.`);
     } catch (error) {
       console.error(error);
@@ -456,6 +629,7 @@ export default function AdminSlots() {
   const startSlotEdit = (slot, { scrollToEditor = true } = {}) => {
     setActionError("");
     setSelectedPropertyId(slot.propertyId);
+    setSelectedSlotId(slot.slotId);
     setEditingSlotId(slot.slotId);
     setSlotEditForm({
       lotNum: slot.lotNum ?? "",
@@ -519,20 +693,31 @@ export default function AdminSlots() {
     setSavingDetailSlotId(currentlyEditingSlot.slotId);
 
     try {
+      const nextDetails = {
+        lotNum: trimmedLotNum,
+        lotArea: trimmedLotArea === "" ? null : Number(trimmedLotArea),
+        price: trimmedPrice === "" ? null : Number(trimmedPrice),
+        blockNum: slotEditForm.blockNum.trim(),
+        phase: slotEditForm.phase.trim(),
+        type: slotEditForm.type.trim(),
+      };
+
       await updateSlotDetails(
         currentlyEditingSlot.slotId,
-        {
-          lotNum: trimmedLotNum,
-          lotArea: trimmedLotArea === "" ? null : Number(trimmedLotArea),
-          price: trimmedPrice === "" ? null : Number(trimmedPrice),
-          blockNum: slotEditForm.blockNum.trim(),
-          phase: slotEditForm.phase.trim(),
-          type: slotEditForm.type.trim(),
-        },
+        nextDetails,
         auth.currentUser?.email ?? "admin",
       );
 
-      toast.success(`Lot ${currentlyEditingSlot.lotNum} details updated successfully.`);
+      // Reflect detail edits immediately while awaiting snapshot propagation.
+      mergeLocalSlotOverride(currentlyEditingSlot.slotId, {
+        ...nextDetails,
+        status: currentlyEditingSlot.currentStatus,
+        unitKey: currentlyEditingSlot.unitKey,
+        sourceKey: currentlyEditingSlot.sourceKey,
+        propertyId: currentlyEditingSlot.propertyId,
+      });
+
+      toast.success(`Lot ${nextDetails.lotNum} details updated successfully.`);
       setEditingSlotId("");
       setSlotEditForm(EMPTY_EDIT_FORM);
     } catch (error) {
@@ -700,32 +885,62 @@ export default function AdminSlots() {
                     preserveAspectRatio="xMidYMid meet"
                   >
                     {allProperties.map((property) => {
-                      const points = parseCoords(property.coords);
-                      if (!points.length) {
+                      const propertySlots = slotsByPropertyId[property.id] ?? [];
+                      const orderedPropertySlots = [...propertySlots].sort((slotA, slotB) => {
+                        const unitKeyA = String(slotA.unitKey ?? "").trim();
+                        const unitKeyB = String(slotB.unitKey ?? "").trim();
+
+                        if (unitKeyA || unitKeyB) {
+                          const unitKeyDifference = unitKeyA.localeCompare(unitKeyB, undefined, { numeric: true, sensitivity: "base" });
+                          if (unitKeyDifference !== 0) {
+                            return unitKeyDifference;
+                          }
+                        }
+
+                        const lotDifference = extractLotSortValue(slotA.lotNum) - extractLotSortValue(slotB.lotNum);
+                        if (lotDifference !== 0) {
+                          return lotDifference;
+                        }
+
+                        return String(slotA.lotNum).localeCompare(String(slotB.lotNum));
+                      });
+                      const outlinePolygons = getPropertyOutlinePolygons(property, propertySlots);
+                      if (!outlinePolygons.length) {
                         return null;
                       }
 
-                      const propertySlots = slotsByPropertyId[property.id] ?? [];
                       const areaVisual = getAreaVisual(propertySlots);
-                      const isSelected = selectedPropertyId === property.id;
-                      const isHovered = hoveredPropertyId === property.id;
+                      const hasSlotMappedPolygons = orderedPropertySlots.length > 1 && orderedPropertySlots.length === outlinePolygons.length;
 
-                      return (
+                      return outlinePolygons.map((points, outlineIndex) => {
+                        const mappedSlot = hasSlotMappedPolygons ? orderedPropertySlots[outlineIndex] : null;
+                        const targetKey = `${property.id}-${outlineIndex}`;
+                        const isSelected = mappedSlot
+                          ? selectedSlotId === mappedSlot.slotId
+                          : selectedPropertyId === property.id && !selectedSlotId;
+                        const isHovered = hoveredMapTargetKey === targetKey;
+                        const visual = mappedSlot ? getSlotVisual(mappedSlot) : areaVisual;
+
+                        return (
                         <polygon
-                          key={property.id}
+                          key={targetKey}
                           points={pointsToSvg(points)}
-                          fill={isSelected || isHovered ? areaVisual.hoverFill : areaVisual.fill}
-                          stroke={isSelected ? "#111827" : areaVisual.stroke}
+                          fill={isHovered ? visual.hoverFill : visual.fill}
+                          stroke={isSelected ? "#111827" : visual.stroke}
                           strokeWidth={isSelected ? 2.5 : 1.2}
                           style={{
                             cursor: "pointer",
                             transition: "fill 0.15s ease, stroke-width 0.15s ease",
                           }}
-                          onClick={() => setSelectedPropertyId(property.id)}
-                          onMouseEnter={() => setHoveredPropertyId(property.id)}
-                          onMouseLeave={() => setHoveredPropertyId("")}
+                          onClick={() => {
+                            setSelectedPropertyId(property.id);
+                            setSelectedSlotId(mappedSlot?.slotId ?? "");
+                          }}
+                          onMouseEnter={() => setHoveredMapTargetKey(targetKey)}
+                          onMouseLeave={() => setHoveredMapTargetKey("")}
                         />
-                      );
+                        );
+                      });
                     })}
                   </svg>
                 </div>
@@ -737,10 +952,6 @@ export default function AdminSlots() {
                       <span className="text-xs text-slate-500 font-medium">{option.label}</span>
                     </div>
                   ))}
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                    <span className="text-xs text-slate-500 font-medium">Mixed Area</span>
-                  </div>
                 </div>
               </div>
 
@@ -753,9 +964,13 @@ export default function AdminSlots() {
                       </div>
                       <div>
                         <p className="text-xs font-bold uppercase tracking-widest text-[#15803d]">Selected Area</p>
-                        <h3 className="text-sm font-bold text-slate-800 mt-0.5">{selectedProperty.info?.type ?? "Property"}</h3>
+                        <h3 className="text-sm font-bold text-slate-800 mt-0.5">
+                          {selectedSlot?.type || selectedProperty.info?.type || "Property"}
+                          {selectedSlot?.unitKey ? ` · Unit ${selectedSlot.unitKey}` : ""}
+                          {selectedSlot?.lotNum ? ` · Lot ${selectedSlot.lotNum}` : ""}
+                        </h3>
                         <p className="text-xs text-slate-400 mt-0.5">
-                          Block {selectedProperty.info?.blockNum} · {selectedProperty.info?.phase}
+                          Block {selectedSlot?.blockNum || selectedProperty.info?.blockNum} · {selectedSlot?.phase || selectedProperty.info?.phase}
                         </p>
                       </div>
                     </div>
@@ -787,7 +1002,7 @@ export default function AdminSlots() {
                               value={slot.currentStatus}
                               onChange={(event) => handleStatusChange(slot, event.target.value)}
                               disabled={savingSlotId === slot.slotId}
-                              className="flex-1 rounded-xl border border-white/60 bg-white/80 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#15803d]/40 focus:border-[#15803d]/50 transition-all shadow-inner"
+                              className={`flex-1 rounded-xl border px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-[#15803d]/40 focus:border-[#15803d]/50 transition-all shadow-inner ${getStatusSelectClass(slot.currentStatus)}`}
                             >
                               {SLOT_STATUS_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>
@@ -971,7 +1186,7 @@ export default function AdminSlots() {
                         value={slot.currentStatus}
                         onChange={(event) => handleStatusChange(slot, event.target.value)}
                         disabled={savingSlotId === slot.slotId}
-                        className="rounded-xl border border-white/60 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#15803d]/30 focus:border-[#15803d]/50 transition-all shadow-inner disabled:opacity-60"
+                        className={`rounded-xl border px-3 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#15803d]/30 focus:border-[#15803d]/50 transition-all shadow-inner disabled:opacity-60 ${getStatusSelectClass(slot.currentStatus)}`}
                       >
                         {SLOT_STATUS_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>

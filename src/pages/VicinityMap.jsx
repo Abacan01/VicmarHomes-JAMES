@@ -54,6 +54,106 @@ function pointsToSvg(points) {
   return points.map(p => `${p.x},${p.y}`).join(" ");
 }
 
+function getDistance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.hypot(dx, dy);
+}
+
+function getMidpoint(a, b) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
+function interpolatePoint(a, b, t) {
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  };
+}
+
+function normalizeQuadPoints(points) {
+  if (points.length !== 4) {
+    return points;
+  }
+
+  const sortedByY = [...points].sort((pointA, pointB) => {
+    if (pointA.y !== pointB.y) {
+      return pointA.y - pointB.y;
+    }
+
+    return pointA.x - pointB.x;
+  });
+
+  const topTwo = [sortedByY[0], sortedByY[1]].sort((pointA, pointB) => pointA.x - pointB.x);
+  const bottomTwo = [sortedByY[2], sortedByY[3]].sort((pointA, pointB) => pointA.x - pointB.x);
+
+  const topLeft = topTwo[0];
+  const topRight = topTwo[1];
+  const bottomLeft = bottomTwo[0];
+  const bottomRight = bottomTwo[1];
+
+  return [topLeft, bottomLeft, bottomRight, topRight];
+}
+
+function splitQuadIntoUnitPolygons(points, unitCount) {
+  if (points.length !== 4 || unitCount <= 1) {
+    return [points];
+  }
+
+  const [p0, p1, p2, p3] = normalizeQuadPoints(points);
+  const pairA = (getDistance(p0, p1) + getDistance(p2, p3)) / 2;
+  const pairB = (getDistance(p1, p2) + getDistance(p3, p0)) / 2;
+  const polygons = [];
+  const shouldUseColumnSplit = unitCount >= 3 || pairB <= pairA;
+
+  if (shouldUseColumnSplit) {
+    for (let index = 0; index < unitCount; index += 1) {
+      const startT = index / unitCount;
+      const endT = (index + 1) / unitCount;
+      polygons.push([
+        interpolatePoint(p0, p3, startT),
+        interpolatePoint(p1, p2, startT),
+        interpolatePoint(p1, p2, endT),
+        interpolatePoint(p0, p3, endT),
+      ]);
+    }
+
+    return polygons;
+  }
+
+  for (let index = 0; index < unitCount; index += 1) {
+    const startT = index / unitCount;
+    const endT = (index + 1) / unitCount;
+    polygons.push([
+      interpolatePoint(p0, p1, startT),
+      interpolatePoint(p0, p1, endT),
+      interpolatePoint(p3, p2, endT),
+      interpolatePoint(p3, p2, startT),
+    ]);
+  }
+
+  return polygons;
+}
+
+function getPropertyOutlinePolygons(property) {
+  if (Array.isArray(property.outlineCoords) && property.outlineCoords.length > 0) {
+    return property.outlineCoords.map(parseCoords);
+  }
+
+  const points = parseCoords(property.coords);
+  const units = getPropertyUnitEntries(property.info);
+  const shouldAutoSplit = units.length > 1 && points.length === 4;
+
+  if (shouldAutoSplit) {
+    return splitQuadIntoUnitPolygons(points, units.length);
+  }
+
+  return [points];
+}
+
 function getUnitInfo(property, slotStatuses) {
   return getPropertyUnitEntries(property.info).map((unitEntry) => {
     const slotId = makeSlotId(property.id, unitEntry.sourceKey);
@@ -97,9 +197,9 @@ export default function VicinityMap() {
   const mapRef = useRef(null);
   const revealRef = useScrollReveal();
 
-  const [hoveredProp, setHoveredProp] = useState(null);
+  const [hoveredTarget, setHoveredTarget] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
-  const [selectedProp, setSelectedProp] = useState(null);
+  const [selectedTarget, setSelectedTarget] = useState(null);
   const [slotStatuses, setSlotStatuses] = useState({});
   const [statusSyncError, setStatusSyncError] = useState("");
 
@@ -216,7 +316,7 @@ export default function VicinityMap() {
     setIsPanning(false);
   };
 
-  const handlePolygonHover = (e, prop) => {
+  const handlePolygonHover = (e, prop, unit = null) => {
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
@@ -224,11 +324,17 @@ export default function VicinityMap() {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
     });
-    setHoveredProp(prop);
+    setHoveredTarget({
+      prop,
+      unit,
+    });
   };
 
-  const handlePolygonClick = (prop) => {
-    setSelectedProp(prop);
+  const handlePolygonClick = (prop, unit = null) => {
+    setSelectedTarget({
+      prop,
+      unit,
+    });
   };
 
   const handleViewListing = (type) => {
@@ -322,7 +428,7 @@ export default function VicinityMap() {
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={() => { handleMouseUp(); setHoveredProp(null); }}
+          onMouseLeave={() => { handleMouseUp(); setHoveredTarget(null); }}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
@@ -382,18 +488,27 @@ export default function VicinityMap() {
                 style={{ pointerEvents: "none" }}
               >
                 {allProperties.map((prop) => {
-                  const points = parseCoords(prop.coords);
+                  const outlinePolygons = getPropertyOutlinePolygons(prop);
                   const typeColor = typeColors[prop.info.type] || defaultColor;
-                  const statusMeta = getPropertyStatusMeta(prop, slotStatuses);
-                  const isHovered = hoveredProp?.id === prop.id;
-                  const isSelected = selectedProp?.id === prop.id;
+                  const propertyStatusMeta = getPropertyStatusMeta(prop, slotStatuses);
+                  const units = getUnitInfo(prop, slotStatuses);
+                  const hasUnitMappedPolygons = units.length > 1 && units.length === outlinePolygons.length;
 
-                  return (
+                  return outlinePolygons.map((points, outlineIndex) => (
+                    (() => {
+                      const mappedUnit = hasUnitMappedPolygons ? units[outlineIndex] : null;
+                      const isSelected = selectedTarget?.prop?.id === prop.id
+                        && (mappedUnit ? selectedTarget?.unit?.key === mappedUnit.key : selectedTarget?.unit === null);
+                      const isHovered = hoveredTarget?.prop?.id === prop.id
+                        && (mappedUnit ? hoveredTarget?.unit?.key === mappedUnit.key : hoveredTarget?.unit === null);
+                      const statusMeta = mappedUnit ? mappedUnit.statusMeta : propertyStatusMeta;
+
+                      return (
                     <polygon
-                      key={prop.id}
+                      key={`${prop.id}-${outlineIndex}`}
                       points={pointsToSvg(points)}
                       fill={statusMeta.color}
-                      fillOpacity={isHovered || isSelected ? 0.62 : 0.42}
+                      fillOpacity={isHovered ? 0.62 : 0.42}
                       stroke={typeColor.stroke}
                       strokeWidth={isHovered || isSelected ? 2 : 1}
                       style={{
@@ -403,22 +518,24 @@ export default function VicinityMap() {
                       }}
                       onMouseMove={(e) => {
                         e.stopPropagation();
-                        handlePolygonHover(e, prop);
+                        handlePolygonHover(e, prop, mappedUnit);
                       }}
-                      onMouseLeave={() => setHoveredProp(null)}
+                      onMouseLeave={() => setHoveredTarget(null)}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handlePolygonClick(prop);
+                        handlePolygonClick(prop, mappedUnit);
                       }}
                     />
-                  );
+                      );
+                    })()
+                  ));
                 })}
               </svg>
             </div>
           </div>
 
           {/* Hover Tooltip */}
-          {hoveredProp && !selectedProp && (
+          {hoveredTarget?.prop && !selectedTarget && (
             <div
               className="tooltip-card absolute z-30 pointer-events-none"
               style={{
@@ -430,13 +547,18 @@ export default function VicinityMap() {
                 <div className="flex items-center gap-2 mb-2">
                   <MapPin className="w-3.5 h-3.5 text-[#16a34a] flex-shrink-0" />
                   <span className="text-xs text-[#16a34a] font-semibold uppercase tracking-wider">
-                    Block {hoveredProp.info.blockNum} · {hoveredProp.info.phase}
+                    Block {hoveredTarget.prop.info.blockNum} · {hoveredTarget.prop.info.phase}
                   </span>
                 </div>
-                <h3 className="text-sm font-bold text-[#16a34a] mb-3">{hoveredProp.info.type}</h3>
+                <h3 className="text-sm font-bold text-[#16a34a] mb-3">
+                  {hoveredTarget.prop.info.type}
+                  {hoveredTarget.unit?.key ? ` · Unit ${hoveredTarget.unit.key}` : ""}
+                </h3>
 
                 {(() => {
-                  const units = getUnitInfo(hoveredProp, slotStatuses);
+                  const units = hoveredTarget.unit
+                    ? [hoveredTarget.unit]
+                    : getUnitInfo(hoveredTarget.prop, slotStatuses);
                   if (units.length === 0) return null;
                   return (
                     <div className="space-y-1.5">
@@ -483,8 +605,8 @@ export default function VicinityMap() {
       </div>
 
       {/* Selected Property Modal */}
-      {selectedProp && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={() => setSelectedProp(null)}>
+      {selectedTarget?.prop && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={() => setSelectedTarget(null)}>
           <div
             className="bg-white rounded-xl max-w-md w-full shadow-2xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
@@ -492,7 +614,7 @@ export default function VicinityMap() {
             {/* Modal Header */}
             <div className="bg-[#15803d] p-6 relative">
               <button
-                onClick={() => setSelectedProp(null)}
+                onClick={() => setSelectedTarget(null)}
                 className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center text-white/70 hover:text-white hover:bg-white/10 rounded-full transition-colors"
               >
                 <X className="w-4 h-4" />
@@ -500,16 +622,21 @@ export default function VicinityMap() {
               <div className="flex items-center gap-2 mb-2">
                 <MapPin className="w-4 h-4 text-[#16a34a]" />
                 <span className="text-xs text-[#16a34a] font-semibold uppercase tracking-wider">
-                  Block {selectedProp.info.blockNum} · {selectedProp.info.phase}
+                  Block {selectedTarget.prop.info.blockNum} · {selectedTarget.prop.info.phase}
                 </span>
               </div>
-              <h3 className="text-xl font-bold text-white">{selectedProp.info.type}</h3>
+              <h3 className="text-xl font-bold text-white">
+                {selectedTarget.prop.info.type}
+                {selectedTarget.unit?.key ? ` · Unit ${selectedTarget.unit.key}` : ""}
+              </h3>
             </div>
 
             {/* Modal Body */}
             <div className="p-6">
               {(() => {
-                const units = getUnitInfo(selectedProp, slotStatuses);
+                const units = selectedTarget.unit
+                  ? [selectedTarget.unit]
+                  : getUnitInfo(selectedTarget.prop, slotStatuses);
                 if (units.length === 0) return <p className="text-gray-400 text-sm">No unit information available.</p>;
 
                 return (
@@ -540,9 +667,9 @@ export default function VicinityMap() {
 
               {/* Action Buttons */}
               <div className="mt-6 flex gap-3">
-                {getListingType(selectedProp.info.type) && (
+                {getListingType(selectedTarget.prop.info.type) && (
                   <Button
-                    onClick={() => handleViewListing(selectedProp.info.type)}
+                    onClick={() => handleViewListing(selectedTarget.prop.info.type)}
                     className="flex-1 bg-[#16a34a] hover:bg-[#22c55e] text-white font-semibold"
                   >
                     View Listings
@@ -550,7 +677,7 @@ export default function VicinityMap() {
                 )}
                 <Button
                   variant="outline"
-                  onClick={() => setSelectedProp(null)}
+                  onClick={() => setSelectedTarget(null)}
                   className="flex-1 border-gray-200 text-gray-600 hover:bg-gray-50"
                 >
                   Close

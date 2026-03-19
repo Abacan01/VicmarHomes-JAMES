@@ -1,24 +1,51 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
-import { AlertCircle, MessageCircle, MoreHorizontal, SendHorizontal } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, Bot, MessageCircle, MoreHorizontal, Plus, Save, SendHorizontal, Trash2 } from "lucide-react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { toast } from "sonner";
 import { auth } from "@/lib/firebase";
 import {
   appendAdminMessage,
+   DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+   DEFAULT_SUPPORT_FAQ_ITEMS,
+   DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+   DEFAULT_SUPPORT_WELCOME_MESSAGE,
   endSupportSession,
+   saveSupportChatConfig,
   setConversationStatus,
+   subscribeToSupportChatConfig,
   subscribeToSupportSessions,
 } from "@/lib/supportChatService";
 
 const ADMIN_AGENT_NAME_KEY = "vicmar_admin_agent_name";
 
 export default function AdminMessages() {
+   const [activeTab, setActiveTab] = useState("live-console");
   const [syncError, setSyncError] = useState("");
+   const [assistantSyncError, setAssistantSyncError] = useState("");
   const [isAdminSessionReady, setIsAdminSessionReady] = useState(false);
   const [supportSessions, setSupportSessions] = useState([]);
   const [activeSupportSessionId, setActiveSupportSessionId] = useState("");
   const [adminReply, setAdminReply] = useState("");
+   const [isSavingAssistantConfig, setIsSavingAssistantConfig] = useState(false);
+   const [assistantConfig, setAssistantConfig] = useState({
+      faqItems: DEFAULT_SUPPORT_FAQ_ITEMS,
+      fallbackReply: DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+      automationMessages: {
+         welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
+         liveAgentRequestedMessage: DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+      },
+   });
+   const [assistantDraft, setAssistantDraft] = useState({
+      faqItems: DEFAULT_SUPPORT_FAQ_ITEMS,
+      fallbackReply: DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+      automationMessages: {
+         welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
+         liveAgentRequestedMessage: DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+      },
+   });
+   const [newFaqQuestion, setNewFaqQuestion] = useState("");
+   const [newFaqAnswer, setNewFaqAnswer] = useState("");
   const [adminAgentName, setAdminAgentName] = useState(() => {
     const storedName = localStorage.getItem(ADMIN_AGENT_NAME_KEY);
     return storedName ? storedName.trim() : "Admin";
@@ -63,6 +90,36 @@ export default function AdminMessages() {
     return unsubscribe;
   }, [isAdminSessionReady]);
 
+   useEffect(() => {
+      if (!isAdminSessionReady) return undefined;
+
+      const unsubscribe = subscribeToSupportChatConfig(
+         (nextConfig) => {
+            const normalizedConfig = {
+               faqItems: Array.isArray(nextConfig?.faqItems) && nextConfig.faqItems.length > 0
+                  ? nextConfig.faqItems
+                  : DEFAULT_SUPPORT_FAQ_ITEMS,
+               fallbackReply: String(nextConfig?.fallbackReply ?? "").trim() || DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+               automationMessages: {
+                  welcomeMessage: String(nextConfig?.automationMessages?.welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE,
+                  liveAgentRequestedMessage: String(nextConfig?.automationMessages?.liveAgentRequestedMessage ?? "").trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+               },
+            };
+
+            setAssistantConfig(normalizedConfig);
+            setAssistantDraft(normalizedConfig);
+            setAssistantSyncError("");
+         },
+         (error) => {
+            console.error(error);
+            setAssistantSyncError("Unable to sync assistant settings right now.");
+         },
+         { allowAnonymous: false },
+      );
+
+      return unsubscribe;
+   }, [isAdminSessionReady]);
+
   const supportSummary = useMemo(() => {
     const result = {
       totalRequests: supportSessions.length,
@@ -96,6 +153,10 @@ export default function AdminMessages() {
   }, [adminAgentName]);
 
   const adminDisplayName = useMemo(() => adminAgentName.trim() || "Admin", [adminAgentName]);
+   const isAssistantDraftDirty = useMemo(
+      () => JSON.stringify(assistantDraft) !== JSON.stringify(assistantConfig),
+      [assistantDraft, assistantConfig],
+   );
 
   const quickReplyTemplates = useMemo(() => {
     return [
@@ -119,6 +180,136 @@ export default function AdminMessages() {
   }, [adminDisplayName]);
 
   const handleUseQuickReply = (text) => setAdminReply(text);
+
+   const handleAssistantFallbackChange = (value) => {
+      setAssistantDraft((currentDraft) => ({
+         ...currentDraft,
+         fallbackReply: value,
+      }));
+   };
+
+   const handleAssistantAutoMessageChange = (field, value) => {
+      setAssistantDraft((currentDraft) => ({
+         ...currentDraft,
+         automationMessages: {
+            ...currentDraft.automationMessages,
+            [field]: value,
+         },
+      }));
+   };
+
+   const handleAssistantFaqChange = (faqId, field, value) => {
+      setAssistantDraft((currentDraft) => ({
+         ...currentDraft,
+         faqItems: currentDraft.faqItems.map((item) => {
+            if (item.id !== faqId) {
+               return item;
+            }
+
+            return {
+               ...item,
+               [field]: value,
+            };
+         }),
+      }));
+   };
+
+   const handleAddAssistantFaq = () => {
+      const trimmedQuestion = newFaqQuestion.trim();
+      const trimmedAnswer = newFaqAnswer.trim();
+
+      if (!trimmedQuestion || !trimmedAnswer) {
+         toast.error("Please enter both question and answer.");
+         return;
+      }
+
+      const nextFaqItem = {
+         id: `faq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+         question: trimmedQuestion,
+         answer: trimmedAnswer,
+      };
+
+      setAssistantDraft((currentDraft) => ({
+         ...currentDraft,
+         faqItems: [...currentDraft.faqItems, nextFaqItem],
+      }));
+      setNewFaqQuestion("");
+      setNewFaqAnswer("");
+   };
+
+   const handleDeleteAssistantFaq = (faqId) => {
+      setAssistantDraft((currentDraft) => {
+         const nextFaqItems = currentDraft.faqItems.filter((item) => item.id !== faqId);
+         return {
+            ...currentDraft,
+            faqItems: nextFaqItems.length > 0 ? nextFaqItems : currentDraft.faqItems,
+         };
+      });
+   };
+
+   const handleMoveAssistantFaq = (faqId, direction) => {
+      setAssistantDraft((currentDraft) => {
+         const currentIndex = currentDraft.faqItems.findIndex((item) => item.id === faqId);
+         if (currentIndex < 0) {
+            return currentDraft;
+         }
+
+         const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+         if (targetIndex < 0 || targetIndex >= currentDraft.faqItems.length) {
+            return currentDraft;
+         }
+
+         const nextFaqItems = [...currentDraft.faqItems];
+         const [movedItem] = nextFaqItems.splice(currentIndex, 1);
+         nextFaqItems.splice(targetIndex, 0, movedItem);
+
+         return {
+            ...currentDraft,
+            faqItems: nextFaqItems,
+         };
+      });
+   };
+
+   const handleResetAssistantDraft = () => {
+      setAssistantDraft(assistantConfig);
+   };
+
+   const handleSaveAssistantConfig = async () => {
+      const normalizedFaqItems = assistantDraft.faqItems
+         .map((item) => ({
+            ...item,
+            question: String(item.question ?? "").trim(),
+            answer: String(item.answer ?? "").trim(),
+         }))
+         .filter((item) => item.question && item.answer);
+
+      if (normalizedFaqItems.length === 0) {
+         toast.error("Please keep at least one FAQ item with both question and answer.");
+         return;
+      }
+
+      const payload = {
+         faqItems: normalizedFaqItems,
+         fallbackReply: String(assistantDraft.fallbackReply ?? "").trim() || DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+         automationMessages: {
+            welcomeMessage: String(assistantDraft.automationMessages?.welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE,
+            liveAgentRequestedMessage: String(assistantDraft.automationMessages?.liveAgentRequestedMessage ?? "").trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+         },
+      };
+
+      setIsSavingAssistantConfig(true);
+      try {
+         const savedConfig = await saveSupportChatConfig(payload, { allowAnonymous: false });
+         setAssistantConfig(savedConfig);
+         setAssistantDraft(savedConfig);
+         toast.success("Assistant replies updated.");
+      } catch (error) {
+         console.error(error);
+         toast.error("Unable to save assistant settings. Please try again.");
+      } finally {
+         setIsSavingAssistantConfig(false);
+      }
+   };
 
   const handleSendAdminReply = (event) => {
     event.preventDefault();
@@ -160,18 +351,49 @@ export default function AdminMessages() {
     currentPage * itemsPerPage
   );
 
-  return (
-    <div className="space-y-6">
-        {syncError && (
-          <div className="flex items-start gap-2.5 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-3.5 shadow-sm">
-            <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0 text-red-500" />
-            <span className="font-medium">{syncError}</span>
-          </div>
-        )}
+   return (
+      <div className="space-y-6">
+         <div className="flex justify-end">
+            <div className="inline-flex rounded-2xl border border-emerald-200 bg-white p-1.5 shadow-sm w-full sm:w-auto">
+               <button
+                  type="button"
+                  onClick={() => setActiveTab("live-console")}
+                  className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-colors ${
+                     activeTab === "live-console"
+                        ? "bg-[#15803d] text-white"
+                        : "text-slate-600 hover:bg-slate-50"
+                  }`}
+               >
+                  <MessageCircle className="w-4 h-4" />
+                  Live Console
+               </button>
+               <button
+                  type="button"
+                  onClick={() => setActiveTab("assistant-setup")}
+                  className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition-colors ${
+                     activeTab === "assistant-setup"
+                        ? "bg-[#15803d] text-white"
+                        : "text-slate-600 hover:bg-slate-50"
+                  }`}
+               >
+                  <Bot className="w-4 h-4" />
+                  Assistant Setup
+               </button>
+            </div>
+         </div>
 
-        <div className="grid grid-cols-1 gap-5">
-           {/* Live Agent Requests Section */}
-           <section className="bg-white/60 backdrop-blur-xl border border-white/60 rounded-3xl shadow-[0_4px_24px_rgb(0,0,0,0.04)] flex flex-col overflow-hidden h-[80vh] hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all duration-400">
+         {activeTab === "live-console" ? (
+            <>
+               {syncError && (
+                  <div className="flex items-start gap-2.5 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-3.5 shadow-sm">
+                     <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0 text-red-500" />
+                     <span className="font-medium">{syncError}</span>
+                  </div>
+               )}
+
+               <div className="grid grid-cols-1 gap-5">
+                  {/* Live Agent Requests Section */}
+                  <section className="bg-white/60 backdrop-blur-xl border border-white/60 rounded-3xl shadow-[0_4px_24px_rgb(0,0,0,0.04)] flex flex-col overflow-hidden h-[80vh] hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all duration-400">
              {/* Header */}
              <div className="px-6 py-4 border-b border-white/40 flex items-center justify-between bg-white/40">
                <div className="flex items-center gap-3">
@@ -184,10 +406,6 @@ export default function AdminMessages() {
                  </div>
                </div>
                <div className="flex items-center gap-2">
-                 <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-100 rounded-full shadow-sm">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wider">{supportSummary.active} Active</span>
-                 </div>
                  <button className="p-2 text-slate-400 hover:bg-slate-100 rounded-xl transition-colors">
                     <MoreHorizontal className="w-5 h-5" />
                  </button>
@@ -202,7 +420,10 @@ export default function AdminMessages() {
                    <div className="p-4 border-b border-white/40">
                       <div className="flex items-center justify-between mb-3 text-xs font-bold text-slate-500 uppercase tracking-wider">
                          <span>Inbox Queue</span>
-                         <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{supportSummary.waiting} Waiting</span>
+                         <div className="flex items-center gap-1.5">
+                           <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{supportSummary.waiting} Waiting</span>
+                           <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">{supportSummary.active} Active</span>
+                         </div>
                       </div>
                    </div>
                    <div className="flex-1 overflow-y-auto w-full p-3 space-y-2">
@@ -407,7 +628,174 @@ export default function AdminMessages() {
                 </div>
              </div>
            </section>
-        </div>
+               </div>
+            </>
+         ) : (
+            <section className="bg-white border border-slate-200 rounded-3xl shadow-[0_12px_38px_rgba(15,23,42,0.08)] overflow-hidden">
+               <div className="px-6 py-5 border-b border-slate-200 bg-[radial-gradient(circle_at_top_right,_rgba(16,185,129,0.14),_transparent_60%)]">
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                     <div className="space-y-1">
+                        <h2 className="text-xl font-black text-slate-900">FAQ Assistant Replies</h2>
+                        <p className="text-sm text-slate-500">Edit quick questions and bot replies used on the customer chat modal.</p>
+                     </div>
+                     <div className="flex items-center gap-2">
+                        <button
+                           type="button"
+                           onClick={handleResetAssistantDraft}
+                           disabled={!isAssistantDraftDirty || isSavingAssistantConfig}
+                           className="text-xs font-bold uppercase tracking-wide rounded-xl px-3.5 py-2 border border-slate-200 text-slate-600 bg-white hover:bg-slate-50 disabled:opacity-50"
+                        >
+                           Discard Changes
+                        </button>
+                        <button
+                           type="button"
+                           onClick={handleSaveAssistantConfig}
+                           disabled={!isAssistantDraftDirty || isSavingAssistantConfig}
+                           className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide rounded-xl px-4 py-2.5 bg-[#15803d] text-white hover:bg-[#166534] disabled:opacity-50"
+                        >
+                           <Save className="w-3.5 h-3.5" />
+                           {isSavingAssistantConfig ? "Saving..." : "Save Assistant"}
+                        </button>
+                     </div>
+                  </div>
+               </div>
+
+               {assistantSyncError ? (
+                  <div className="mx-6 mt-5 flex items-start gap-2.5 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-3.5">
+                     <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0 text-red-500" />
+                     <span className="font-medium">{assistantSyncError}</span>
+                  </div>
+               ) : null}
+
+               <div className="grid grid-cols-1 xl:grid-cols-[340px_minmax(0,1fr)] gap-6 p-6">
+                  <aside className="space-y-4">
+                     <div className="rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Automatic chat messages</p>
+
+                        <label className="block text-xs font-semibold text-slate-500 mt-3 mb-1">Welcome message (first bot message)</label>
+                        <textarea
+                           value={assistantDraft.automationMessages?.welcomeMessage ?? ""}
+                           onChange={(event) => handleAssistantAutoMessageChange("welcomeMessage", event.target.value)}
+                           rows={4}
+                           className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                           placeholder="Initial message shown when a new chat starts"
+                        />
+
+                        <label className="block text-xs font-semibold text-slate-500 mt-3 mb-1">Live agent requested message</label>
+                        <textarea
+                           value={assistantDraft.automationMessages?.liveAgentRequestedMessage ?? ""}
+                           onChange={(event) => handleAssistantAutoMessageChange("liveAgentRequestedMessage", event.target.value)}
+                           rows={3}
+                           className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                           placeholder="System message shown after user taps Request live agent"
+                        />
+                     </div>
+
+                     <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-lime-50 p-4">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">Default fallback reply</p>
+                        <textarea
+                           value={assistantDraft.fallbackReply}
+                           onChange={(event) => handleAssistantFallbackChange(event.target.value)}
+                           rows={5}
+                           className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                           placeholder="Reply when no FAQ matches the user question"
+                        />
+                     </div>
+
+                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">Add new FAQ</p>
+                        <div className="space-y-2">
+                           <input
+                              type="text"
+                              value={newFaqQuestion}
+                              onChange={(event) => setNewFaqQuestion(event.target.value)}
+                              placeholder="Quick question"
+                              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#15803d]/25"
+                           />
+                           <textarea
+                              value={newFaqAnswer}
+                              onChange={(event) => setNewFaqAnswer(event.target.value)}
+                              rows={4}
+                              placeholder="Bot answer"
+                              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#15803d]/25"
+                           />
+                           <button
+                              type="button"
+                              onClick={handleAddAssistantFaq}
+                              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 text-white text-sm font-bold py-2.5 hover:bg-slate-800"
+                           >
+                              <Plus className="w-4 h-4" />
+                              Add FAQ Item
+                           </button>
+                        </div>
+                     </div>
+                  </aside>
+
+                  <div className="space-y-3 max-h-[68vh] overflow-y-auto pr-1">
+                     {assistantDraft.faqItems.map((item, index) => (
+                        <article key={item.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow">
+                           <div className="flex items-center justify-between gap-3 mb-3">
+                              <div className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                 <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 inline-flex items-center justify-center">{index + 1}</span>
+                                 FAQ Item
+                              </div>
+                              <div className="flex items-center gap-1">
+                                 <button
+                                    type="button"
+                                    onClick={() => handleMoveAssistantFaq(item.id, "up")}
+                                    disabled={index === 0}
+                                    className="w-8 h-8 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                    aria-label="Move up"
+                                 >
+                                    <ArrowUp className="w-4 h-4 mx-auto" />
+                                 </button>
+                                 <button
+                                    type="button"
+                                    onClick={() => handleMoveAssistantFaq(item.id, "down")}
+                                    disabled={index === assistantDraft.faqItems.length - 1}
+                                    className="w-8 h-8 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                    aria-label="Move down"
+                                 >
+                                    <ArrowDown className="w-4 h-4 mx-auto" />
+                                 </button>
+                                 <button
+                                    type="button"
+                                    onClick={() => handleDeleteAssistantFaq(item.id)}
+                                    disabled={assistantDraft.faqItems.length === 1}
+                                    className="w-8 h-8 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                                    aria-label="Delete FAQ"
+                                 >
+                                    <Trash2 className="w-4 h-4 mx-auto" />
+                                 </button>
+                              </div>
+                           </div>
+
+                           <div className="space-y-3">
+                              <div>
+                                 <label className="block text-xs font-semibold text-slate-500 mb-1">Question</label>
+                                 <input
+                                    type="text"
+                                    value={item.question}
+                                    onChange={(event) => handleAssistantFaqChange(item.id, "question", event.target.value)}
+                                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#15803d]/25"
+                                 />
+                              </div>
+                              <div>
+                                 <label className="block text-xs font-semibold text-slate-500 mb-1">Answer</label>
+                                 <textarea
+                                    value={item.answer}
+                                    onChange={(event) => handleAssistantFaqChange(item.id, "answer", event.target.value)}
+                                    rows={4}
+                                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#15803d]/25"
+                                 />
+                              </div>
+                           </div>
+                        </article>
+                     ))}
+                  </div>
+               </div>
+            </section>
+         )}
     </div>
   );
 }

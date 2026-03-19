@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { createPageUrl } from "./utils";
 import { Menu, X, Phone, Mail, MapPin, Facebook, Instagram, Youtube, ChevronDown, HelpCircle, ChevronUp, MessageCircle, SendHorizontal } from "lucide-react";
@@ -8,58 +8,218 @@ import {
   appendBotMessage,
   appendUserMessage,
   createSupportSession,
+  DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+  DEFAULT_SUPPORT_FAQ_ITEMS,
+  DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+  DEFAULT_SUPPORT_WELCOME_MESSAGE,
   endSupportSession,
   getOrCreateActiveSupportSession,
   requestLiveAgent,
+  subscribeToSupportChatConfig,
   subscribeToSupportSessions,
 } from "@/lib/supportChatService";
+import { buildVicinitySlots, getAllVicinityProperties } from "@/lib/vicinitySlots";
+import { normalizeSlotStatus } from "@/lib/slotStatus";
+import { subscribeToSlotStatuses } from "@/lib/slotStatusService";
+const CHAT_MAX_CHARACTERS = 320;
+const CHAT_MAX_WORDS = 60;
+const CHAT_MAX_WORD_LENGTH = 42;
+const CHAT_MIN_SEND_INTERVAL_MS = 1200;
+const CHAT_BURST_WINDOW_MS = 15000;
+const CHAT_BURST_MAX_MESSAGES = 4;
 
-const FAQ_ITEMS = [
-  {
-    question: "What payment methods are available?",
-    answer: "We offer flexible payment options including bank financing, Pag-IBIG financing, in-house financing, and spot cash payments with discounts. Our sales team can help you find the best payment plan that suits your budget."
-  },
-  {
-    question: "What amenities are included in the community?",
-    answer: "Vicmar Homes features communal greenways with food gardens, vermicompost areas, playgrounds, and open spaces. Each home includes garden space for food and herb production, with options for vertical gardens, aquaponics, and rainwater tanks."
-  },
-  {
-    question: "How does the purchase process work?",
-    answer: "The process starts with a site visit and property selection. After choosing your home, you'll complete the reservation with a minimal fee, submit requirements for financing, and upon approval, sign the contract to sell. Our team guides you through every step."
-  },
-  {
-    question: "Are there maintenance fees?",
-    answer: "Yes, there are association dues for the upkeep of common areas including the greenways, communal gardens, and shared facilities. These fees ensure the sustainable features of the community are properly maintained for all residents."
-  },
-];
+function detectPropertyTypeIntent(question) {
+  const q = String(question ?? "").toLowerCase();
+  if (q.includes("duplex")) return "duplex";
+  if (q.includes("triplex")) return "triplex";
+  if (q.includes("corner")) return "corner";
+  if (q.includes("compound")) return "compound";
+  if (q.includes("economic")) return "economic";
+  if (q.includes("socialized")) return "socialized";
+  if (q.includes("rowhouse") || q.includes("row house")) return "rowhouse";
+  return "";
+}
 
-const BOT_FALLBACK_ANSWER = "Thanks for your question. I can help with payment options, amenities, purchase process, and fees. If you need more help, tap Request live agent.";
+function normalizeTypeForMatch(rawType) {
+  return String(rawType ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
 
-function getBotReply(question) {
-  const normalizedQuestion = String(question ?? "").trim().toLowerCase();
+function typeMatches(rawType, requestedType) {
+  if (!requestedType) return true;
+  const normalizedType = normalizeTypeForMatch(rawType);
+  if (!normalizedType) return false;
+  if (requestedType === "rowhouse") {
+    return normalizedType.includes("rowhouse") || normalizedType.includes("row house");
+  }
+  return normalizedType.includes(requestedType);
+}
 
-  if (!normalizedQuestion) {
-    return BOT_FALLBACK_ANSWER;
+function summarizeAvailability(slots, requestedType = "") {
+  const filteredSlots = slots.filter((slot) => typeMatches(slot.type, requestedType));
+  if (filteredSlots.length === 0) {
+    return null;
   }
 
-  const matchedItem = FAQ_ITEMS.find((item) => {
-    const normalizedPrompt = item.question.toLowerCase();
-    return normalizedPrompt.includes(normalizedQuestion) || normalizedQuestion.includes(normalizedPrompt);
+  const available = filteredSlots.filter((slot) => slot.status === "available").length;
+  const reserved = filteredSlots.filter((slot) => slot.status === "reserved").length;
+  const notAvailable = filteredSlots.filter((slot) => slot.status === "not_available").length;
+
+  return {
+    total: filteredSlots.length,
+    available,
+    reserved,
+    notAvailable,
+  };
+}
+
+function summarizeArea(slots, requestedType = "") {
+  const areas = slots
+    .filter((slot) => typeMatches(slot.type, requestedType))
+    .map((slot) => Number(slot.lotArea))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (areas.length === 0) {
+    return null;
+  }
+
+  return {
+    min: Math.min(...areas),
+    max: Math.max(...areas),
+  };
+}
+
+function summarizeTypes(slots) {
+  const typeCounts = new Map();
+
+  slots.forEach((slot) => {
+    const type = String(slot.type ?? "").trim() || "Unit";
+    typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
   });
 
-  return matchedItem?.answer ?? BOT_FALLBACK_ANSWER;
+  return [...typeCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => `${type} (${count})`)
+    .slice(0, 6)
+    .join(", ");
+}
+
+function getRuleBasedBotReply(question, slots, assistantConfig) {
+  const q = String(question ?? "").toLowerCase();
+  const requestedType = detectPropertyTypeIntent(q);
+
+  const asksAvailability =
+    q.includes("available") ||
+    q.includes("availability") ||
+    q.includes("vacant") ||
+    q.includes("how many") ||
+    q.includes("count") ||
+    q.includes("units left") ||
+    q.includes("remaining");
+
+  if (asksAvailability) {
+    const summary = summarizeAvailability(slots, requestedType);
+    if (summary) {
+      const scopeLabel = requestedType ? `${requestedType} units` : "all units";
+      return `Current ${scopeLabel} status: ${summary.available} available, ${summary.reserved} reserved, and ${summary.notAvailable} not available (total ${summary.total}). For exact lot numbers, please open Vicinity Map or ask for a live agent.`;
+    }
+  }
+
+  const asksArea = q.includes("lot area") || q.includes("sqm") || q.includes("square meter") || q.includes("size");
+  if (asksArea) {
+    const areaSummary = summarizeArea(slots, requestedType);
+    if (areaSummary) {
+      const scopeLabel = requestedType ? `${requestedType} units` : "our units";
+      return `For ${scopeLabel}, lot areas currently range around ${areaSummary.min} sqm to ${areaSummary.max} sqm based on the latest map configuration.`;
+    }
+  }
+
+  if (q.includes("what units") || q.includes("unit types") || q.includes("types available")) {
+    const typesText = summarizeTypes(slots);
+    if (typesText) {
+      return `Current mapped unit types include: ${typesText}. Ask me for availability of a specific type (example: duplex, triplex, rowhouse).`;
+    }
+  }
+
+  if (q.includes("payment") || q.includes("financing") || q.includes("pag ibig") || q.includes("pag-ibig") || q.includes("loan")) {
+    return "We support flexible payment options including bank financing, Pag-IBIG, in-house financing, and spot cash options. I can connect you to a live agent to discuss exact computations and requirements.";
+  }
+
+  if (q.includes("amenit") || q.includes("garden") || q.includes("playground") || q.includes("community")) {
+    return "Vicmar Homes includes community greenways, food gardens, playground areas, and shared open spaces designed for sustainable living.";
+  }
+
+  if (q.includes("location") || q.includes("where") || q.includes("vicinity") || q.includes("map")) {
+    return "You can explore exact lot placement in the Vicinity Map page for block, phase, and unit-level details. If you need guided recommendations, tap Request live agent.";
+  }
+
+  const matchedItem = assistantConfig.faqItems.find((item) => {
+    const prompt = String(item?.question ?? "").toLowerCase();
+    return prompt.includes(q) || q.includes(prompt);
+  });
+
+  if (matchedItem?.answer) {
+    return matchedItem.answer;
+  }
+
+  return assistantConfig.fallbackReply;
+}
+
+function normalizeChatMessage(rawValue) {
+  return String(rawValue ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .trim();
+}
+
+function validateChatMessage(rawValue) {
+  const normalized = normalizeChatMessage(rawValue);
+
+  if (!normalized) {
+    return { ok: false, value: "", reason: "Please type a message first." };
+  }
+
+  if (normalized.length > CHAT_MAX_CHARACTERS) {
+    return { ok: false, value: normalized, reason: `Message is too long (max ${CHAT_MAX_CHARACTERS} characters).` };
+  }
+
+  const words = normalized.split(" ").filter(Boolean);
+  if (words.length > CHAT_MAX_WORDS) {
+    return { ok: false, value: normalized, reason: `Please keep message up to ${CHAT_MAX_WORDS} words.` };
+  }
+
+  if (words.some((word) => word.length > CHAT_MAX_WORD_LENGTH)) {
+    return { ok: false, value: normalized, reason: `A word is too long (max ${CHAT_MAX_WORD_LENGTH} characters per word).` };
+  }
+
+  return { ok: true, value: normalized, reason: "" };
 }
 
 export default function Layout({ children, currentPageName }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
+  const [quickQuestionsOpen, setQuickQuestionsOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [chatInputError, setChatInputError] = useState("");
   const [activeChatId, setActiveChatId] = useState("");
   const [chatSession, setChatSession] = useState(null);
+  const [assistantConfig, setAssistantConfig] = useState({
+    faqItems: DEFAULT_SUPPORT_FAQ_ITEMS,
+    fallbackReply: DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+    automationMessages: {
+      welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
+      liveAgentRequestedMessage: DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+    },
+  });
+  const [slotStatuses, setSlotStatuses] = useState({});
   const faqPanelRef = useRef(null);
   const faqBtnRef = useRef(null);
   const chatMessagesRef = useRef(null);
+  const lastUserSendAtRef = useRef(0);
+  const recentUserSendsRef = useRef([]);
 
   useEffect(() => {
     const onScroll = () => setShowScrollTop(window.scrollY > 300);
@@ -81,6 +241,12 @@ export default function Layout({ children, currentPageName }) {
   }, [faqOpen]);
 
   useEffect(() => {
+    if (!faqOpen) {
+      setQuickQuestionsOpen(false);
+    }
+  }, [faqOpen]);
+
+  useEffect(() => {
     let isMounted = true;
 
     const initializeSession = async () => {
@@ -98,6 +264,51 @@ export default function Layout({ children, currentPageName }) {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  const mappedSlots = useMemo(() => {
+    const baseSlots = buildVicinitySlots(getAllVicinityProperties());
+    return baseSlots.map((slot) => {
+      const override = slotStatuses[slot.slotId];
+      const status = normalizeSlotStatus(override?.status ?? slot.defaultStatus);
+
+      return {
+        ...slot,
+        status,
+      };
+    });
+  }, [slotStatuses]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSlotStatuses(
+      (statuses) => {
+        setSlotStatuses(statuses ?? {});
+      },
+      () => undefined,
+    );
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSupportChatConfig(
+      (config) => {
+        setAssistantConfig({
+          faqItems: Array.isArray(config?.faqItems) && config.faqItems.length > 0
+            ? config.faqItems
+            : DEFAULT_SUPPORT_FAQ_ITEMS,
+          fallbackReply: String(config?.fallbackReply ?? "").trim() || DEFAULT_SUPPORT_BOT_FALLBACK_ANSWER,
+          automationMessages: {
+            welcomeMessage: String(config?.automationMessages?.welcomeMessage ?? "").trim() || DEFAULT_SUPPORT_WELCOME_MESSAGE,
+            liveAgentRequestedMessage: String(config?.automationMessages?.liveAgentRequestedMessage ?? "").trim() || DEFAULT_SUPPORT_LIVE_AGENT_REQUESTED_MESSAGE,
+          },
+        });
+      },
+      () => undefined,
+      { allowAnonymous: true },
+    );
+
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
@@ -160,10 +371,14 @@ export default function Layout({ children, currentPageName }) {
   };
 
   const handleSendQuestion = async (rawQuestion) => {
-    const question = String(rawQuestion ?? "").trim();
-    if (!question) {
+    const validation = validateChatMessage(rawQuestion);
+    if (!validation.ok) {
+      setChatInputError(validation.reason);
       return;
     }
+
+    const question = validation.value;
+    setChatInputError("");
 
     const sessionId = await ensureActiveSession();
     if (!sessionId) {
@@ -171,8 +386,34 @@ export default function Layout({ children, currentPageName }) {
     }
 
     if (chatSession?.status === "closed") {
+      setChatInputError("This chat is closed. Start a new chat to continue.");
       return;
     }
+
+    const now = Date.now();
+    const timeSinceLastSend = now - lastUserSendAtRef.current;
+    if (timeSinceLastSend < CHAT_MIN_SEND_INTERVAL_MS) {
+      setChatInputError(`Please wait ${Math.ceil((CHAT_MIN_SEND_INTERVAL_MS - timeSinceLastSend) / 1000)}s before sending again.`);
+      return;
+    }
+
+    recentUserSendsRef.current = recentUserSendsRef.current.filter((timestamp) => now - timestamp <= CHAT_BURST_WINDOW_MS);
+    if (recentUserSendsRef.current.length >= CHAT_BURST_MAX_MESSAGES) {
+      setChatInputError("Too many messages in a short time. Please slow down.");
+      return;
+    }
+
+    const normalizedQuestion = question.toLowerCase();
+    const lastUserMessage = [...(chatSession?.messages ?? [])]
+      .reverse()
+      .find((message) => message.sender === "user");
+    if (lastUserMessage && normalizeChatMessage(lastUserMessage.text).toLowerCase() === normalizedQuestion) {
+      setChatInputError("You just sent the same message. Please edit it before sending again.");
+      return;
+    }
+
+    lastUserSendAtRef.current = now;
+    recentUserSendsRef.current.push(now);
 
     appendUserMessage(sessionId, question);
 
@@ -180,7 +421,8 @@ export default function Layout({ children, currentPageName }) {
       return;
     }
 
-    const botReply = getBotReply(question);
+    const botReply = getRuleBasedBotReply(question, mappedSlots, assistantConfig);
+
     window.setTimeout(() => {
       appendBotMessage(sessionId, botReply);
     }, 240);
@@ -188,12 +430,13 @@ export default function Layout({ children, currentPageName }) {
 
   const handleSubmitChatInput = async (e) => {
     e.preventDefault();
-    const nextMessage = chatInput.trim();
-    if (!nextMessage) {
+    const validation = validateChatMessage(chatInput);
+    if (!validation.ok) {
+      setChatInputError(validation.reason);
       return;
     }
 
-    await handleSendQuestion(nextMessage);
+    await handleSendQuestion(validation.value);
     setChatInput("");
   };
 
@@ -217,6 +460,10 @@ export default function Layout({ children, currentPageName }) {
     setActiveChatId(nextSession.id);
     setChatSession(nextSession);
     setChatInput("");
+    setChatInputError("");
+    setQuickQuestionsOpen(false);
+    lastUserSendAtRef.current = 0;
+    recentUserSendsRef.current = [];
   };
 
   const handleStartNewChat = async () => {
@@ -224,6 +471,10 @@ export default function Layout({ children, currentPageName }) {
     setActiveChatId(session.id);
     setChatSession(session);
     setChatInput("");
+    setChatInputError("");
+    setQuickQuestionsOpen(false);
+    lastUserSendAtRef.current = 0;
+    recentUserSendsRef.current = [];
   };
 
   const isChatClosed = chatSession?.status === "closed";
@@ -665,23 +916,6 @@ export default function Layout({ children, currentPageName }) {
               </button>
             </div>
 
-            <div className="px-4 pt-3 pb-2 border-b border-gray-100">
-              <p className="text-xs text-gray-500 mb-2">Quick questions:</p>
-              <div className="flex flex-wrap gap-2">
-                {FAQ_ITEMS.map((item) => (
-                  <button
-                    key={item.question}
-                    type="button"
-                    onClick={() => handleSendQuestion(item.question)}
-                    disabled={isChatClosed}
-                    className="text-xs px-3 py-1.5 rounded-full border border-green-200 bg-green-50 text-[#15803d] hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {item.question}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             <div ref={chatMessagesRef} className="chat-scrollbar max-h-[290px] min-h-[220px] overflow-y-auto px-4 py-3 space-y-2 bg-[#f8faf8]">
               {(chatSession?.messages ?? []).map((message) => {
                 const isUser = message.sender === "user";
@@ -705,7 +939,7 @@ export default function Layout({ children, currentPageName }) {
                       }`}
                     >
                       {isAdmin ? <p className="text-[10px] font-semibold text-blue-600 mb-1">Live agent</p> : null}
-                      <p>{message.text}</p>
+                      <p className="break-words [overflow-wrap:anywhere]">{message.text}</p>
                     </div>
                   </div>
                 );
@@ -754,13 +988,64 @@ export default function Layout({ children, currentPageName }) {
                 </div>
               </div>
 
+              <div className="relative">
+                <button
+                  type="button"
+                  disabled={isChatClosed}
+                  onClick={() => setQuickQuestionsOpen((open) => !open)}
+                  className="w-full rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 via-green-50 to-lime-50 px-3 py-2.5 text-left transition-all hover:shadow-sm disabled:opacity-55 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[11px] uppercase tracking-wide text-emerald-700/80 font-semibold">Quick shortcuts</p>
+                      <p className="text-sm text-slate-700 font-medium truncate">Quick questions ({assistantConfig.faqItems.length})</p>
+                    </div>
+                    <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full bg-white border border-emerald-200 text-emerald-700 transition-transform ${quickQuestionsOpen ? "rotate-180" : "rotate-0"}`}>
+                      <ChevronDown className="w-4 h-4" />
+                    </span>
+                  </div>
+                </button>
+
+                <div className={`grid transition-all duration-300 ease-out ${quickQuestionsOpen ? "grid-rows-[1fr] opacity-100 mt-2" : "grid-rows-[0fr] opacity-0 mt-0"}`}>
+                  <div className="overflow-hidden">
+                    <div className="rounded-xl border border-emerald-100 bg-white p-2.5 shadow-sm max-h-40 overflow-y-auto chat-scrollbar">
+                      <div className="flex flex-wrap gap-2">
+                        {assistantConfig.faqItems.map((item) => (
+                          <button
+                            key={item.id ?? item.question}
+                            type="button"
+                            onClick={() => {
+                              setQuickQuestionsOpen(false);
+                              handleSendQuestion(item.question);
+                            }}
+                            disabled={isChatClosed}
+                            className="text-xs px-3 py-1.5 rounded-full border border-green-200 bg-green-50 text-[#15803d] hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {item.question}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <form onSubmit={handleSubmitChatInput} className="flex items-center gap-2">
                 <input
                   type="text"
                   value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
+                  onChange={(e) => {
+                    const nextValue = e.target.value;
+                    if (nextValue.length <= CHAT_MAX_CHARACTERS) {
+                      setChatInput(nextValue);
+                    }
+                    if (chatInputError) {
+                      setChatInputError("");
+                    }
+                  }}
                   disabled={isChatClosed}
                   placeholder="Type your question"
+                  maxLength={CHAT_MAX_CHARACTERS}
                   className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#16a34a]/30 disabled:bg-slate-100 disabled:text-slate-400"
                 />
                 <button
@@ -771,6 +1056,13 @@ export default function Layout({ children, currentPageName }) {
                   <SendHorizontal className="w-4 h-4" />
                 </button>
               </form>
+
+              <div className="flex items-center justify-between">
+                <p className={`text-[11px] ${chatInputError ? "text-rose-600" : "text-gray-400"}`}>
+                  {chatInputError || `Max ${CHAT_MAX_CHARACTERS} characters · ${CHAT_BURST_MAX_MESSAGES} msgs / ${Math.floor(CHAT_BURST_WINDOW_MS / 1000)}s`}
+                </p>
+                <p className="text-[11px] text-gray-400">{chatInput.length}/{CHAT_MAX_CHARACTERS}</p>
+              </div>
 
               <p className="text-[11px] text-gray-400 text-center">Need direct help? <Link to={createPageUrl("ContactUs")} onClick={() => setFaqOpen(false)} className="text-[#16a34a] font-semibold hover:underline">Contact us</Link></p>
             </div>

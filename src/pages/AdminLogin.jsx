@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { signInWithEmailAndPassword, onAuthStateChanged } from "firebase/auth";
 import { ArrowLeft, LockKeyhole, Mail } from "lucide-react";
 import { auth } from "@/lib/firebase";
+import { getAdminLoginErrorMessage, isAuthorizedAdminUser } from "@/lib/adminAccess";
 import { createPageUrl } from "../utils";
 import heroImg from "@/images/hero-properties.jpg";
 import logoImg from "@/images/logos/transparent-vicmar-logo.png";
@@ -25,7 +26,7 @@ export default function AdminLogin() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user && !user.isAnonymous) {
+      if (isAuthorizedAdminUser(user)) {
         navigate(createPageUrl("AdminDashboard"), { replace: true });
         return;
       }
@@ -42,7 +43,14 @@ export default function AdminLogin() {
     setIsSubmitting(true);
 
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
+      const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
+
+      if (!isAuthorizedAdminUser(credential.user)) {
+        setErrorMessage(getAdminLoginErrorMessage());
+        await auth.signOut();
+        return;
+      }
+
       navigate(createPageUrl("AdminDashboard"), { replace: true });
     } catch (error) {
       const friendlyMessage = AUTH_ERROR_MESSAGES[error.code] ?? "Login failed. Please try again.";
@@ -174,7 +182,7 @@ export default function AdminLogin() {
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-11 pr-4 py-4 text-sm text-slate-800 transition-all placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#15803d]/20 focus:border-[#15803d] hover:border-slate-300"
-                  placeholder="vicmar@homes.com"
+                  placeholder="Enter your admin email"
                   required
                 />
                 <Mail className="w-5 h-5 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -190,7 +198,7 @@ export default function AdminLogin() {
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-11 pr-4 py-4 text-sm text-slate-800 transition-all placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#15803d]/20 focus:border-[#15803d] hover:border-slate-300"
-                  placeholder="123456"
+                  placeholder="Enter your password"
                   required
                 />
                 <LockKeyhole className="w-5 h-5 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
