@@ -27,6 +27,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.vscan-findings.json
 
+.vscan
 .env
 vicmar0312.zip

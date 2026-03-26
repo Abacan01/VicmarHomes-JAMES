@@ -11,7 +11,6 @@ import {
   MapPinned, 
   MessageCircle,
   PhilippinePeso,
-  Shield,
   TrendingUp
 } from "lucide-react";
 import { auth } from "@/lib/firebase";

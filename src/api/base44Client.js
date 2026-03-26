@@ -226,7 +226,7 @@ const mockProperties = [
 // Local storage keys
 const STORAGE_KEYS = {
   USER: 'vicmar_user',
-  TOKEN: 'vicmar_token',
+  AUTH_SESSION: 'vicmar_auth_session',
   INQUIRIES: 'vicmar_inquiries'
 };
 
@@ -270,7 +270,7 @@ const auth = {
   // Logout user
   logout: (redirectUrl = null) => {
     localStorage.removeItem(STORAGE_KEYS.USER);
-    localStorage.removeItem(STORAGE_KEYS.TOKEN);
+    localStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
     if (redirectUrl) {
       window.location.href = redirectUrl;
     }

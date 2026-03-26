@@ -3,13 +3,23 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCxisG9BJJJxePqiHkR705GqtQ5jVB0DiE",
-  authDomain: "vicmarhomesweb.firebaseapp.com",
-  projectId: "vicmarhomesweb",
-  storageBucket: "vicmarhomesweb.firebasestorage.app",
-  messagingSenderId: "224644292114",
-  appId: "1:224644292114:web:16d37eb73dc2ca6a3d82cb",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
+
+const missingFirebaseConfig = Object.entries(firebaseConfig)
+  .filter(([, value]) => !value)
+  .map(([key]) => key);
+
+if (missingFirebaseConfig.length > 0) {
+  throw new Error(
+    `Missing Firebase environment variables: ${missingFirebaseConfig.join(", ")}`
+  );
+}
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);

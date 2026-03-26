@@ -670,17 +670,6 @@ export default function Layout({ children, currentPageName }) {
     }
   };
 
-  const handleStartNewChat = async () => {
-    const session = await createSupportSession();
-    setActiveChatId(session.id);
-    setChatSession(session);
-    setChatInput("");
-    setChatInputError("");
-    setQuickQuestionsOpen(false);
-    lastUserSendAtRef.current = 0;
-    recentUserSendsRef.current = [];
-  };
-
   const isChatClosed = chatSession?.status === "closed";
   const isAdminTyping = chatSession?.typing?.admin && chatSession?.status === "agent-connected";
   const idleLimitMinutes = Math.floor(SUPPORT_CHAT_IDLE_TIMEOUT_MS / 60000);

@@ -21,8 +21,6 @@ import { createPageUrl } from "@/utils";
 import ModernLoader from "@/components/ModernLoader";
 import { subscribeToAdminNotifications } from "@/lib/notificationService";
 import * as Dialog from "@radix-ui/react-dialog";
-import * as Popover from "@radix-ui/react-popover";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Toaster, toast } from "sonner";
 import { MapPinned as MapPinIcon, MessageCircle as MsgIcon } from "lucide-react";
 

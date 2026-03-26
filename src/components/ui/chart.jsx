@@ -10,6 +10,9 @@ const THEMES = {
   dark: ".dark"
 }
 
+const SAFE_CSS_VAR_KEY = /^[a-zA-Z0-9_-]+$/
+const SAFE_COLOR_VALUE = /^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s,%.]+\)|hsla?\([\d\s,%.]+\)|var\(--[a-zA-Z0-9_-]+\))$/
+
 const ChartContext = React.createContext(null)
 
 function useChart() {
@@ -24,7 +27,7 @@ function useChart() {
 
 const ChartContainer = React.forwardRef(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId()
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  const chartId = `chart-${String(id || uniqueId).replace(/[^a-zA-Z0-9_-]/g, "")}`
 
   return (
     (<ChartContext.Provider value={{ config }}>
@@ -46,34 +49,54 @@ const ChartContainer = React.forwardRef(({ id, className, children, config, ...p
 })
 ChartContainer.displayName = "Chart"
 
+const sanitizeChartColor = (value) => {
+  if (typeof value !== "string") {
+    return null
+  }
+
+  const trimmedValue = value.trim()
+  return SAFE_COLOR_VALUE.test(trimmedValue) ? trimmedValue : null
+}
+
 const ChartStyle = ({
   id,
   config
 }) => {
-  const colorConfig = Object.entries(config).filter(([, config]) => config.theme || config.color)
+  const colorConfig = Object.entries(config ?? {}).filter(([, config]) => config?.theme || config?.color)
 
   if (!colorConfig.length) {
     return null
   }
 
+  const cssByTheme = Object.entries(THEMES)
+    .map(([theme, prefix]) => {
+      const cssVars = colorConfig
+        .map(([key, itemConfig]) => {
+          if (!SAFE_CSS_VAR_KEY.test(key)) {
+            return null
+          }
+
+          const color = sanitizeChartColor(itemConfig.theme?.[theme] || itemConfig.color)
+          return color ? `  --color-${key}: ${color};` : null
+        })
+        .filter(Boolean)
+        .join("\n")
+
+      if (!cssVars) {
+        return ""
+      }
+
+      return `${prefix} [data-chart=\"${id}\"] {\n${cssVars}\n}`
+    })
+    .filter(Boolean)
+    .join("\n")
+
+  if (!cssByTheme) {
+    return null
+  }
+
   return (
-    (<style
-      dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
-${colorConfig
-.map(([key, itemConfig]) => {
-const color =
-  itemConfig.theme?.[theme] ||
-  itemConfig.color
-return color ? `  --color-${key}: ${color};` : null
-})
-.join("\n")}
-}
-`)
-          .join("\n"),
-      }} />)
+    (<style>{cssByTheme}</style>)
   );
 }
 

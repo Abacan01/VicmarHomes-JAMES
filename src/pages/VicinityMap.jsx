@@ -60,13 +60,6 @@ function getDistance(a, b) {
   return Math.hypot(dx, dy);
 }
 
-function getMidpoint(a, b) {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-  };
-}
-
 function interpolatePoint(a, b, t) {
   return {
     x: a.x + (b.x - a.x) * t,
