@@ -15,7 +15,7 @@ export const SLOT_STATUS_OPTIONS = [
   },
   {
     value: "not_available",
-    label: "Not Available",
+    label: "Sold",
     dotClass: "bg-red-500",
     textClass: "text-red-500",
     color: "#ef4444",

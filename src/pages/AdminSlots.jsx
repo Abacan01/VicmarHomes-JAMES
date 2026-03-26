@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Filter, MapPin, Pencil, Save } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertCircle, Filter, MapPin, Pencil, Save, ArrowUpDown, ArrowUp, ArrowDown, Settings } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "@/components/ui/pagination";
 import { Button } from "@/components/ui/button";
@@ -63,15 +64,15 @@ const EMPTY_EDIT_FORM = {
 };
 
 const TABLE_FILTER_FIELDS = [
-  { key: "lotNum", label: "Lot" },
-  { key: "lotArea", label: "Area" },
-  { key: "price", label: "Price" },
-  { key: "unit", label: "Unit" },
-  { key: "blockNum", label: "Block" },
-  { key: "phase", label: "Phase" },
-  { key: "type", label: "Type" },
-  { key: "status", label: "Status" },
-  { key: "source", label: "Source" },
+  { key: "type", label: "Type", enabled: true },
+  { key: "unit", label: "Unit", enabled: true },
+  { key: "status", label: "Status", enabled: true },
+  { key: "price", label: "Price", enabled: true },
+  { key: "lotNum", label: "Lot", enabled: false },
+  { key: "lotArea", label: "Area", enabled: false },
+  { key: "blockNum", label: "Block", enabled: false },
+  { key: "phase", label: "Phase", enabled: false },
+  { key: "source", label: "Source", enabled: false },
 ];
 
 function createEmptyTableFilters() {
@@ -318,8 +319,11 @@ function getStatusSelectClass(statusValue) {
 export default function AdminSlots() {
   const [statusOverrides, setStatusOverrides] = useState({});
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
+  const [isFilterSettingsOpen, setIsFilterSettingsOpen] = useState(false);
   const [appliedTableFilters, setAppliedTableFilters] = useState(() => createEmptyTableFilters());
   const [draftTableFilters, setDraftTableFilters] = useState(() => createEmptyTableFilters());
+  const [filterFields, setFilterFields] = useState(TABLE_FILTER_FIELDS);
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: null });
   const [savingSlotId, setSavingSlotId] = useState("");
   const [syncError, setSyncError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -538,13 +542,17 @@ export default function AdminSlots() {
     }, {});
   }, [slotsWithStatus]);
 
+  const enabledFilterFields = useMemo(() => {
+    return filterFields.filter((field) => field.enabled);
+  }, [filterFields]);
+
   const activeFilterFieldCount = useMemo(() => {
-    return TABLE_FILTER_FIELDS.filter((field) => (appliedTableFilters[field.key] ?? []).length > 0).length;
-  }, [appliedTableFilters]);
+    return enabledFilterFields.filter((field) => (appliedTableFilters[field.key] ?? []).length > 0).length;
+  }, [appliedTableFilters, enabledFilterFields]);
 
   const activeFilterValueCount = useMemo(() => {
-    return TABLE_FILTER_FIELDS.reduce((total, field) => total + (appliedTableFilters[field.key] ?? []).length, 0);
-  }, [appliedTableFilters]);
+    return enabledFilterFields.reduce((total, field) => total + (appliedTableFilters[field.key] ?? []).length, 0);
+  }, [appliedTableFilters, enabledFilterFields]);
 
   const filteredSlots = useMemo(() => {
     return slotsWithStatus.filter((slot) => {
@@ -560,15 +568,60 @@ export default function AdminSlots() {
     });
   }, [slotsWithStatus, appliedTableFilters]);
 
+  const sortedAndFilteredSlots = useMemo(() => {
+    if (!sortConfig.key) return filteredSlots;
+
+    return [...filteredSlots].sort((a, b) => {
+      let aVal, bVal;
+
+      if (sortConfig.key === 'lotNum') {
+        aVal = extractLotSortValue(a.lotNum);
+        bVal = extractLotSortValue(b.lotNum);
+      } else if (sortConfig.key === 'lotArea') {
+        aVal = a.lotArea ?? -1;
+        bVal = b.lotArea ?? -1;
+      } else if (sortConfig.key === 'price') {
+        aVal = a.price ?? -1;
+        bVal = b.price ?? -1;
+      } else if (sortConfig.key === 'unit') {
+        aVal = a.unitKey || '';
+        bVal = b.unitKey || '';
+      } else if (sortConfig.key === 'blockNum') {
+        aVal = a.blockNum || '';
+        bVal = b.blockNum || '';
+      } else if (sortConfig.key === 'phase') {
+        aVal = a.phase || '';
+        bVal = b.phase || '';
+      } else if (sortConfig.key === 'type') {
+        aVal = a.type || '';
+        bVal = b.type || '';
+      } else if (sortConfig.key === 'status') {
+        aVal = a.currentStatus || '';
+        bVal = b.currentStatus || '';
+      } else {
+        return 0;
+      }
+
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        const comparison = aVal.localeCompare(bVal, undefined, { numeric: true });
+        return sortConfig.direction === 'asc' ? comparison : -comparison;
+      }
+
+      if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [filteredSlots, sortConfig]);
+
   const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(filteredSlots.length / TABLE_PAGE_SIZE));
-  }, [filteredSlots.length]);
+    return Math.max(1, Math.ceil(sortedAndFilteredSlots.length / TABLE_PAGE_SIZE));
+  }, [sortedAndFilteredSlots.length]);
 
   const paginatedSlots = useMemo(() => {
     const startIndex = (currentPage - 1) * TABLE_PAGE_SIZE;
     const endIndex = startIndex + TABLE_PAGE_SIZE;
-    return filteredSlots.slice(startIndex, endIndex);
-  }, [currentPage, filteredSlots]);
+    return sortedAndFilteredSlots.slice(startIndex, endIndex);
+  }, [currentPage, sortedAndFilteredSlots]);
 
   const currentlyEditingSlot = useMemo(() => {
     return slotsWithStatus.find((slot) => slot.slotId === editingSlotId) ?? null;
@@ -774,6 +827,30 @@ export default function AdminSlots() {
     setDraftTableFilters(emptyFilters);
   };
 
+  const handleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' };
+        if (prev.direction === 'desc') return { key: null, direction: null };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
+
+  const getSortIcon = (key) => {
+    if (sortConfig.key !== key) return <ArrowUpDown className="w-3.5 h-3.5 opacity-40" />;
+    if (sortConfig.direction === 'asc') return <ArrowUp className="w-3.5 h-3.5" />;
+    return <ArrowDown className="w-3.5 h-3.5" />;
+  };
+
+  const handleToggleFilterField = (fieldKey) => {
+    setFilterFields((prev) =>
+      prev.map((field) =>
+        field.key === fieldKey ? { ...field, enabled: !field.enabled } : field
+      )
+    );
+  };
+
   return (
       <div className="space-y-6">
         {/* TOP METRICS - Modern accent border cards */}
@@ -835,7 +912,7 @@ export default function AdminSlots() {
               <div className="w-1.5 bg-rose-500 rounded-l-2xl" />
               <div className="flex-1 p-5 flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-1">Not Available</p>
+                  <p className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-1">Sold</p>
                   <h2 className="text-3xl font-black text-rose-600 tracking-tight">{statusSummary.not_available}</h2>
                   <p className="text-[11px] text-rose-500/70 mt-1 font-medium">Closed deals</p>
                 </div>
@@ -1048,6 +1125,37 @@ export default function AdminSlots() {
             </div>
 
             <div className="flex items-center gap-2">
+              <Popover open={isFilterSettingsOpen} onOpenChange={setIsFilterSettingsOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 rounded-xl border-slate-200 text-slate-600"
+                  >
+                    <Settings className="w-4 h-4" />
+                    Customize
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-[280px] p-0 border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-slate-100 bg-white">
+                    <p className="text-sm font-bold text-slate-800">Filter Categories</p>
+                    <p className="text-[11px] text-slate-500">Enable/disable filter options</p>
+                  </div>
+                  <div className="max-h-[320px] overflow-y-auto px-4 py-3 space-y-2 bg-slate-50/40">
+                    {filterFields.map((field) => (
+                      <label key={field.key} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer hover:bg-white/60 p-2 rounded-lg transition-colors">
+                        <Checkbox
+                          checked={field.enabled}
+                          onCheckedChange={() => handleToggleFilterField(field.key)}
+                          className="border-slate-300 data-[state=checked]:bg-[#15803d] data-[state=checked]:border-[#15803d]"
+                        />
+                        <span className="font-medium">{field.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
+
               {activeFilterValueCount > 0 ? (
                 <Button
                   type="button"
@@ -1091,7 +1199,7 @@ export default function AdminSlots() {
                   </div>
 
                   <div className="max-h-[380px] overflow-y-auto px-4 py-3 space-y-3 bg-slate-50/40">
-                    {TABLE_FILTER_FIELDS.map((field) => {
+                    {enabledFilterFields.map((field) => {
                       const options = tableFilterOptions[field.key] ?? [];
                       const selectedValues = draftTableFilters[field.key] ?? [];
                       const allSelected = options.length > 0 && selectedValues.length === options.length;
@@ -1154,14 +1262,46 @@ export default function AdminSlots() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="bg-[#15803d] text-white">
-                  <th className="text-left font-bold px-5 py-4 text-xs tracking-wider rounded-tl-2xl">Lot</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Area</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Price</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Unit</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Block</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Phase</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Type</th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Status</th>
+                  <th className="text-left font-bold px-5 py-4 text-xs tracking-wider rounded-tl-2xl">
+                    <button onClick={() => handleSort('lotNum')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Lot {getSortIcon('lotNum')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('lotArea')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Area {getSortIcon('lotArea')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('price')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Price {getSortIcon('price')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('unit')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Unit {getSortIcon('unit')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('blockNum')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Block {getSortIcon('blockNum')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('phase')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Phase {getSortIcon('phase')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('type')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Type {getSortIcon('type')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('status')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      Status {getSortIcon('status')}
+                    </button>
+                  </th>
                   <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Source</th>
                   <th className="text-left font-bold px-5 py-4 text-xs tracking-wider">Edit</th>
                 </tr>
@@ -1229,7 +1369,7 @@ export default function AdminSlots() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/40 pt-5 mt-2">
             <p className="text-xs text-slate-500 font-medium">
               Showing <span className="font-semibold text-slate-600">{paginatedSlots.length}</span> of{" "}
-              <span className="font-semibold text-slate-600">{filteredSlots.length}</span> filtered slots {"-"} Page{" "}
+              <span className="font-semibold text-slate-600">{sortedAndFilteredSlots.length}</span> filtered slots {"-"} Page{" "}
               <span className="font-semibold text-slate-600">{currentPage}</span> of{" "}
               <span className="font-semibold text-slate-600">{totalPages}</span>
             </p>
