@@ -38,7 +38,8 @@ function Reveal({ children, delay = 0, className = "" }) {
 export default function PropertyDetail() {
   const urlParams = new URLSearchParams(window.location.search);
   const propertyId = urlParams.get("id");
-  const requestedTourType = urlParams.get("tour") === "interior" ? "interior" : "exterior";
+  const requestedTourParam = urlParams.get("tour");
+  const requestedTourType = requestedTourParam === "interior" ? "interior" : "exterior";
   const queryClient = useQueryClient();
 
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
@@ -68,6 +69,18 @@ export default function PropertyDetail() {
     return unsubscribe;
   }, [propertyId, queryClient]);
 
+  useEffect(() => {
+    if (didAutoOpenRequestedTour || !property) {
+      return;
+    }
+
+    if (requestedTourParam === "interior" || requestedTourParam === "exterior") {
+      setActiveTourType(requestedTourType);
+      setShowVirtualTour(true);
+      setDidAutoOpenRequestedTour(true);
+    }
+  }, [didAutoOpenRequestedTour, property, requestedTourParam, requestedTourType]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -94,18 +107,6 @@ export default function PropertyDetail() {
 
   const tours = resolvePropertyPanoramaSources(property);
   const activeTourSource = activeTourType === "interior" ? tours.interior : tours.exterior;
-
-  useEffect(() => {
-    if (didAutoOpenRequestedTour || !property) {
-      return;
-    }
-
-    if (urlParams.get("tour") === "interior" || urlParams.get("tour") === "exterior") {
-      setActiveTourType(requestedTourType);
-      setShowVirtualTour(true);
-      setDidAutoOpenRequestedTour(true);
-    }
-  }, [didAutoOpenRequestedTour, property, requestedTourType, urlParams]);
 
   const formatPrice = (value) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', maximumFractionDigits: 0 }).format(value);
