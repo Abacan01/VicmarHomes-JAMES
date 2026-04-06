@@ -68,10 +68,9 @@ const TABLE_FILTER_FIELDS = [
   { key: "status", label: "Status", enabled: true },
   { key: "price", label: "Price", enabled: true },
   { key: "lotNum", label: "Lot", enabled: false },
-  { key: "lotArea", label: "Area", enabled: false },
+  { key: "lotArea", label: "Floor Area", enabled: false },
   { key: "blockNum", label: "Block", enabled: false },
   { key: "phase", label: "Phase", enabled: false },
-  { key: "source", label: "Source", enabled: false },
 ];
 
 function createEmptyTableFilters() {
@@ -507,10 +506,6 @@ export default function AdminSlots() {
 
     if (fieldKey === "status") {
       return slot.currentMeta?.label ?? getSlotStatusMeta(slot.currentStatus).label;
-    }
-
-    if (fieldKey === "source") {
-      return slot.hasOverride ? "Admin" : "Default";
     }
 
     return "";
@@ -1255,46 +1250,45 @@ export default function AdminSlots() {
               <thead>
                 <tr className="bg-[#15803d] text-white">
                   <th className="text-left font-bold px-5 py-4 text-xs tracking-wider rounded-tl-2xl">
-                    <button onClick={() => handleSort('lotNum')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Lot {getSortIcon('lotNum')}
-                    </button>
-                  </th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
-                    <button onClick={() => handleSort('lotArea')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Area {getSortIcon('lotArea')}
-                    </button>
-                  </th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
-                    <button onClick={() => handleSort('price')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Price {getSortIcon('price')}
-                    </button>
-                  </th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
                     <button onClick={() => handleSort('unit')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Unit {getSortIcon('unit')}
+                      UNIT {getSortIcon('unit')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('lotNum')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      LOT {getSortIcon('lotNum')}
                     </button>
                   </th>
                   <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
                     <button onClick={() => handleSort('blockNum')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Block {getSortIcon('blockNum')}
+                      BLOCK {getSortIcon('blockNum')}
                     </button>
                   </th>
                   <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
                     <button onClick={() => handleSort('phase')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Phase {getSortIcon('phase')}
+                      PHASE {getSortIcon('phase')}
+                    </button>
+                  </th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('price')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      PRICE {getSortIcon('price')}
                     </button>
                   </th>
                   <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
                     <button onClick={() => handleSort('type')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Type {getSortIcon('type')}
+                      TYPE {getSortIcon('type')}
                     </button>
                   </th>
                   <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
                     <button onClick={() => handleSort('status')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
-                      Status {getSortIcon('status')}
+                      STATUS {getSortIcon('status')}
                     </button>
                   </th>
-                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">Source</th>
+                  <th className="text-left font-semibold px-4 py-3 text-xs uppercase tracking-wider">
+                    <button onClick={() => handleSort('lotArea')} className="flex items-center gap-1.5 hover:opacity-80 transition-opacity">
+                      FLOOR AREA {getSortIcon('lotArea')}
+                    </button>
+                  </th>
                   <th className="text-left font-bold px-5 py-4 text-xs tracking-wider">Edit</th>
                 </tr>
               </thead>
@@ -1306,12 +1300,11 @@ export default function AdminSlots() {
                     onClick={() => setSelectedPropertyId(slot.propertyId)}
                     className="hover:bg-white/60 transition-colors cursor-pointer"
                   >
-                    <td className="px-5 py-3.5 text-slate-800 font-bold">{slot.lotNum}</td>
-                    <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.lotArea ? `${slot.lotArea} m2` : "-"}</td>
-                    <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.price !== null ? formatPhp(slot.price) : "-"}</td>
                     <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.unitKey ? `Unit ${slot.unitKey}` : "-"}</td>
+                    <td className="px-5 py-3.5 text-slate-800 font-bold">{slot.lotNum}</td>
                     <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.blockNum || "-"}</td>
                     <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.phase || "-"}</td>
+                    <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.price !== null ? formatPhp(slot.price) : "-"}</td>
                     <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.type || "-"}</td>
                     <td className="px-5 py-3.5">
                       <select
@@ -1327,17 +1320,7 @@ export default function AdminSlots() {
                         ))}
                       </select>
                     </td>
-                    <td className="px-4 py-3">
-                      {slot.hasOverride ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600">
-                          Admin
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">
-                          Default
-                        </span>
-                      )}
-                    </td>
+                    <td className="px-5 py-3.5 text-slate-600 font-medium">{slot.lotArea ? `${slot.lotArea} m2` : "-"}</td>
                     <td className="px-4 py-3">
                       <button
                         type="button"

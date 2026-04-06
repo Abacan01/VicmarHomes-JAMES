@@ -9,19 +9,12 @@ import {
   Bed, Bath, Square, MapPin, ArrowLeft, Phone,
   ChevronLeft, ChevronRight, Check, Maximize, Eye, MessageCircle
 } from "lucide-react";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
-import "leaflet/dist/leaflet.css";
-import L from "leaflet";
 import PanoramaViewer from "@/components/shared/PanoramaViewer";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import { getPropertyByIdWithLivePrice, subscribeToPropertyPriceOverrides } from "@/lib/propertyPriceService";
-
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-});
+import fallbackPropertyImage from "@/images/hero-properties.jpg";
+import propertyMapImage from "@/images/properties_map/baseMap2.jpg";
+import { resolvePropertyPanoramaSources } from "@/lib/panoramaTour";
 
 const typeLabels = {
   duplex: "Duplex",
@@ -45,11 +38,14 @@ function Reveal({ children, delay = 0, className = "" }) {
 export default function PropertyDetail() {
   const urlParams = new URLSearchParams(window.location.search);
   const propertyId = urlParams.get("id");
+  const requestedTourType = urlParams.get("tour") === "interior" ? "interior" : "exterior";
   const queryClient = useQueryClient();
 
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [showGallery, setShowGallery] = useState(false);
   const [showVirtualTour, setShowVirtualTour] = useState(false);
+  const [activeTourType, setActiveTourType] = useState(requestedTourType);
+  const [didAutoOpenRequestedTour, setDidAutoOpenRequestedTour] = useState(false);
   const [showFloorPlan, setShowFloorPlan] = useState(false);
   const [selectedFloorPlan, setSelectedFloorPlan] = useState(null);
 
@@ -93,8 +89,23 @@ export default function PropertyDetail() {
 
   const allImages = [property.main_image, ...(property.gallery_images || [])].filter(Boolean);
   if (allImages.length === 0) {
-    allImages.push("https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1200&q=80");
+    allImages.push(fallbackPropertyImage);
   }
+
+  const tours = resolvePropertyPanoramaSources(property);
+  const activeTourSource = activeTourType === "interior" ? tours.interior : tours.exterior;
+
+  useEffect(() => {
+    if (didAutoOpenRequestedTour || !property) {
+      return;
+    }
+
+    if (urlParams.get("tour") === "interior" || urlParams.get("tour") === "exterior") {
+      setActiveTourType(requestedTourType);
+      setShowVirtualTour(true);
+      setDidAutoOpenRequestedTour(true);
+    }
+  }, [didAutoOpenRequestedTour, property, requestedTourType, urlParams]);
 
   const formatPrice = (value) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', maximumFractionDigits: 0 }).format(value);
@@ -282,19 +293,39 @@ export default function PropertyDetail() {
         )}
 
         {/* Quick Actions */}
-        {property.panorama_image && (
+        {tours.hasAny && (
           <Reveal>
             <div className="flex flex-wrap gap-3">
-              {property.panorama_image && (
-                <Button
-                  onClick={() => setShowVirtualTour(true)}
-                  className="bg-[#16a34a] hover:bg-[#16a34a]/90 gap-2 rounded-full px-6"
-                >
-                  <Eye className="w-4 h-4" />
-                  360° Virtual Tour
-                </Button>
-              )}
+              <Button
+                onClick={() => {
+                  setActiveTourType("exterior");
+                  setShowVirtualTour(true);
+                }}
+                className="bg-[#16a34a] hover:bg-[#16a34a]/90 gap-2 rounded-full px-6"
+              >
+                <Eye className="w-4 h-4" />
+                360° Exterior Tour
+              </Button>
+
+              <Button
+                onClick={() => {
+                  setActiveTourType("interior");
+                  setShowVirtualTour(true);
+                }}
+                variant="outline"
+                className="border-[#16a34a]/40 text-[#16a34a] hover:bg-[#16a34a]/5 gap-2 rounded-full px-6"
+                title={tours.isInteriorFallback ? "Using exterior tour as interior placeholder" : "Interior 360 tour"}
+              >
+                <Eye className="w-4 h-4" />
+                360° Interior Tour
+              </Button>
             </div>
+
+            {tours.isInteriorFallback && (
+              <p className="text-xs text-slate-500 mt-2">
+                Interior tour currently uses an exterior placeholder. Replace `panorama_interior_image` later when your interior 360 is ready.
+              </p>
+            )}
           </Reveal>
         )}
 
@@ -388,19 +419,28 @@ export default function PropertyDetail() {
               <p className="text-[#16a34a] text-xs font-semibold uppercase tracking-widest mb-2">Where It Is</p>
               <h2 className="text-xl font-bold text-[#16a34a] mb-5">Location</h2>
               <div className="h-80 rounded-xl overflow-hidden border border-gray-100">
-                <MapContainer
-                  center={[property.latitude, property.longitude]}
-                  zoom={15}
-                  style={{ height: "100%", width: "100%" }}
-                >
-                  <TileLayer
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                <div className="relative h-full w-full">
+                  <img
+                    src={propertyMapImage}
+                    alt="Vicmar Homes location map"
+                    className="h-full w-full object-cover"
                   />
-                  <Marker position={[property.latitude, property.longitude]}>
-                    <Popup>{property.title}</Popup>
-                  </Marker>
-                </MapContainer>
+                  <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                    <div className="text-center text-white px-4">
+                      <p className="text-lg font-bold mb-2">{property.title}</p>
+                      <p className="text-sm mb-4">Latitude: {property.latitude}, Longitude: {property.longitude}</p>
+                      <a
+                        href={`https://www.google.com/maps?q=${property.latitude},${property.longitude}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 px-4 py-2 bg-[#16a34a] hover:bg-[#22c55e] rounded-lg font-semibold text-sm transition-colors"
+                      >
+                        <MapPin className="w-4 h-4" />
+                        Open in Google Maps
+                      </a>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </Reveal>
@@ -467,11 +507,39 @@ export default function PropertyDetail() {
       <Dialog open={showVirtualTour} onOpenChange={setShowVirtualTour}>
         <DialogContent className="max-w-6xl w-[95vw] p-0">
           <DialogHeader className="p-4 pb-0">
-            <DialogTitle>360° Virtual Tour — {property.title}</DialogTitle>
+            <DialogTitle>360° {activeTourType === "interior" ? "Interior" : "Exterior"} Tour — {property.title}</DialogTitle>
           </DialogHeader>
+          <div className="px-4 pb-3 flex flex-wrap items-center gap-2 border-b border-gray-100">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Tour Type</span>
+            <Button
+              type="button"
+              size="sm"
+              variant={activeTourType === "exterior" ? "default" : "outline"}
+              className={activeTourType === "exterior" ? "bg-[#16a34a] hover:bg-[#16a34a]/90" : "border-[#16a34a]/40 text-[#16a34a]"}
+              onClick={() => setActiveTourType("exterior")}
+            >
+              Exterior
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={activeTourType === "interior" ? "default" : "outline"}
+              className={activeTourType === "interior" ? "bg-[#16a34a] hover:bg-[#16a34a]/90" : "border-[#16a34a]/40 text-[#16a34a]"}
+              onClick={() => setActiveTourType("interior")}
+            >
+              Interior
+            </Button>
+            {activeTourType === "interior" && tours.isInteriorFallback && (
+              <span className="text-[11px] text-slate-500">Using exterior placeholder</span>
+            )}
+          </div>
           <div className="w-full h-[70vh]">
-            {property.panorama_image && (
-              <PanoramaViewer src={property.panorama_image} alt={`360° view of ${property.title}`} />
+            {activeTourSource ? (
+              <PanoramaViewer src={activeTourSource} alt={`360° ${activeTourType} view of ${property.title}`} />
+            ) : (
+              <div className="h-full w-full flex items-center justify-center text-slate-500 text-sm">
+                No 360 image available for this property yet.
+              </div>
             )}
           </div>
         </DialogContent>

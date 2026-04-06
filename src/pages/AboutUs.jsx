@@ -4,6 +4,9 @@ import { createPageUrl } from "@/utils";
 import MissionPhilosophySection from "@/components/about/MissionPhilosophySection";
 import CoreValuesSection from "@/components/about/CoreValuesSection";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
+import heroImage from "@/images/hero-properties.jpg";
+import logoImage from "@/images/logos/transparent-vicmar-logo.png";
+import introImage from "@/images/community.jpg";
 
 /* ── Scroll-reveal wrapper ───────────────────────────────────────── */
 function Reveal({ children, className = "", delay = 0 }) {
@@ -110,7 +113,7 @@ export default function AboutUs() {
       <div
         className="relative w-full"
         style={{
-          backgroundImage: "url('/src/images/hero-properties.jpg')",
+          backgroundImage: `url(${heroImage})`,
           backgroundSize: "cover",
           backgroundPosition: "center",
           minHeight: "320px",
@@ -129,29 +132,41 @@ export default function AboutUs() {
 
       {/* ── 2. ABOUT US INTRO ───────────────────────────────────────── */}
       <section className="bg-white py-14 px-4 sm:px-8 lg:px-16">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-8">
-          <Reveal className="flex-1">
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10 items-center">
+          <Reveal className="min-w-0">
             <p
               className="text-xs font-bold uppercase tracking-widest mb-3"
               style={{ color: "#16a34a" }}
             >
               About Us
             </p>
-            <h2 className="text-2xl md:text-3xl font-extrabold text-gray-800 mb-4 max-w-lg">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-gray-800 mb-4 max-w-xl">
               Vicmar Homes: Where Sustainability Meets Comfortable Living
             </h2>
-            <p className="text-gray-500 text-sm leading-relaxed max-w-lg">
+            <p className="text-gray-500 text-sm leading-relaxed max-w-xl">
               Vicmar Homes is a sustainable and affordable housing community located in Barangay San Jose, Sico, Batangas City. The project focuses on resource efficiency and promotes sustainable living for families in the area. It also encourages home-based food gardening, allowing residents to grow their own fresh and healthy food. The housing units are designed with flexible layouts so they can easily adapt to the different needs of homeowners. With its eco-friendly concept and practical design, Vicmar Homes offers a modern and comfortable community for people who want a better way of living in Batangas City.
             </p>
+
+            <div className="mt-8">
+              <Link
+                to={createPageUrl("ContactUs")}
+                className="inline-block px-8 py-3 text-sm font-bold uppercase tracking-widest text-white rounded"
+                style={{ background: "#16a34a" }}
+              >
+                Inquire Now
+              </Link>
+            </div>
           </Reveal>
-          <Reveal delay={120} className="flex-shrink-0">
-            <Link
-              to={createPageUrl("ContactUs")}
-              className="inline-block px-8 py-3 text-sm font-bold uppercase tracking-widest text-white rounded"
-              style={{ background: "#16a34a" }}
-            >
-              Inquire Now
-            </Link>
+
+          <Reveal delay={120}>
+            <div className="relative overflow-hidden rounded-2xl shadow-md border border-gray-100">
+              <img
+                src={introImage}
+                alt="Vicmar Homes sustainable community"
+                className="w-full h-[260px] sm:h-[320px] lg:h-[360px] object-cover"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/25 to-transparent" />
+            </div>
           </Reveal>
         </div>
       </section>
@@ -173,7 +188,7 @@ export default function AboutUs() {
                 style={{ background: "#ffffff" }}
               >
                 <img
-                  src="/src/images/logos/transparent-vicmar-logo.png"
+                  src={logoImage}
                   alt="Vicmar Logo"
                   className="w-16 h-16 object-contain"
                 />

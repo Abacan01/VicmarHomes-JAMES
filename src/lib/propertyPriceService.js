@@ -3,7 +3,7 @@ import { collection, doc, getDoc, getDocs, onSnapshot, serverTimestamp, setDoc }
 import { auth, db } from "@/lib/firebase";
 
 const PROPERTY_PRICE_COLLECTION = "propertyPrices";
-const PROPERTY_PRICE_RANGE_DOC_ID = "__range__";
+const PROPERTY_PRICE_RANGE_DOC_ID = "rangeSettings";
 const DEFAULT_PROPERTY_PRICE_RANGE = {
 	minPrice: 500000,
 	maxPrice: 5000000,
