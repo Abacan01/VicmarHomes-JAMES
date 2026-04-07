@@ -106,6 +106,7 @@ export default function PropertyDetail() {
   }
 
   const tours = resolvePropertyPanoramaSources(property);
+  const defaultTourType = tours.hasExterior ? "exterior" : "interior";
   const activeTourSource = activeTourType === "interior" ? tours.interior : tours.exterior;
 
   const formatPrice = (value) =>
@@ -294,41 +295,20 @@ export default function PropertyDetail() {
         )}
 
         {/* Quick Actions */}
-        {tours.hasAny && (
-          <Reveal>
-            <div className="flex flex-wrap gap-3">
-              <Button
-                onClick={() => {
-                  setActiveTourType("exterior");
-                  setShowVirtualTour(true);
-                }}
-                className="bg-[#16a34a] hover:bg-[#16a34a]/90 gap-2 rounded-full px-6"
-              >
-                <Eye className="w-4 h-4" />
-                360° Exterior Tour
-              </Button>
-
-              <Button
-                onClick={() => {
-                  setActiveTourType("interior");
-                  setShowVirtualTour(true);
-                }}
-                variant="outline"
-                className="border-[#16a34a]/40 text-[#16a34a] hover:bg-[#16a34a]/5 gap-2 rounded-full px-6"
-                title={tours.isInteriorFallback ? "Using exterior tour as interior placeholder" : "Interior 360 tour"}
-              >
-                <Eye className="w-4 h-4" />
-                360° Interior Tour
-              </Button>
-            </div>
-
-            {tours.isInteriorFallback && (
-              <p className="text-xs text-slate-500 mt-2">
-                Interior tour currently uses an exterior placeholder. Replace `panorama_interior_image` later when your interior 360 is ready.
-              </p>
-            )}
-          </Reveal>
-        )}
+        <Reveal>
+          <div className="flex flex-wrap gap-3">
+            <Button
+              onClick={() => {
+                setActiveTourType(defaultTourType);
+                setShowVirtualTour(true);
+              }}
+              className="bg-[#16a34a] hover:bg-[#16a34a]/90 gap-2 rounded-full px-6"
+            >
+              <Eye className="w-4 h-4" />
+              View 360 Tour
+            </Button>
+          </div>
+        </Reveal>
 
         {/* Description */}
         {property.description && (
@@ -530,16 +510,13 @@ export default function PropertyDetail() {
             >
               Interior
             </Button>
-            {activeTourType === "interior" && tours.isInteriorFallback && (
-              <span className="text-[11px] text-slate-500">Using exterior placeholder</span>
-            )}
           </div>
           <div className="w-full h-[70vh]">
             {activeTourSource ? (
               <PanoramaViewer src={activeTourSource} alt={`360° ${activeTourType} view of ${property.title}`} />
             ) : (
               <div className="h-full w-full flex items-center justify-center text-slate-500 text-sm">
-                No 360 image available for this property yet.
+                No 360 image found for this unit.
               </div>
             )}
           </div>

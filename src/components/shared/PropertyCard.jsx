@@ -33,9 +33,9 @@ export default function PropertyCard({ property, showTourButtons = false }) {
   };
 
   const propertyDetailUrl = createPageUrl("PropertyDetail") + `?id=${property.id}`;
-  const exteriorTourUrl = `${propertyDetailUrl}&tour=exterior`;
-  const interiorTourUrl = `${propertyDetailUrl}&tour=interior`;
   const tours = resolvePropertyPanoramaSources(property);
+  const initialTourType = tours.hasExterior ? "exterior" : "interior";
+  const tourEntryUrl = `${propertyDetailUrl}&tour=${initialTourType}`;
 
   return (
     <div className="group bg-white rounded-xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 border border-gray-100">
@@ -116,20 +116,13 @@ export default function PropertyCard({ property, showTourButtons = false }) {
         </div>
       </Link>
 
-      {showTourButtons && tours.hasAny && (
-        <div className="px-6 pb-6 pt-1 flex flex-wrap gap-2">
+      {showTourButtons && (
+        <div className="px-6 pb-6 pt-1">
           <Link
-            to={exteriorTourUrl}
-            className="inline-flex items-center justify-center rounded-full border border-[#16a34a]/30 text-[#16a34a] hover:bg-[#16a34a]/10 font-semibold text-xs px-3 py-1.5 transition-colors"
-          >
-            360 Exterior
-          </Link>
-          <Link
-            to={interiorTourUrl}
+            to={tourEntryUrl}
             className="inline-flex items-center justify-center rounded-full bg-[#16a34a] text-white hover:bg-[#22c55e] font-semibold text-xs px-3 py-1.5 transition-colors"
-            title={tours.isInteriorFallback ? "Using exterior tour as interior placeholder" : "Interior 360 tour"}
           >
-            360 Interior
+            View 360 Tour
           </Link>
         </div>
       )}
